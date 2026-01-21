@@ -34,6 +34,8 @@ class RoomScene extends Phaser.Scene {
       frameHeight: 16,
     });
     this.load.image("room_pc", "/assets/room/pokeputer.png");
+    this.load.image("ui_dpad", "/assets/ui/dpad.png");
+    this.load.image("ui_a", "/assets/ui/abutton.png");
   }
 
   create() {
@@ -62,6 +64,7 @@ class RoomScene extends Phaser.Scene {
     this.cursors = this.input.keyboard.createCursorKeys();
     this.keyA = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.A);
     this.keySpace = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+    this.keyEnter = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.ENTER);
 
     this.touch = { left: false, right: false, up: false, down: false, interact: false };
     this.lastPressedTime = { left: 0, right: 0, up: 0, down: 0 };
@@ -165,8 +168,30 @@ class RoomScene extends Phaser.Scene {
   }
 
   createControls() {
+    this.deckBg = this.add.rectangle(0, 0, 10, 10, 0x000000).setOrigin(0, 0);
+    this.uiLayer.add(this.deckBg);
+
+    this.dpadVisual = this.add.container(0, 0);
+    const dpadImg = this.add.image(0, 0, "ui_dpad").setOrigin(0.5);
+    this.dpadVisual.add(dpadImg);
+    this.uiLayer.add(this.dpadVisual);
+
+    this.aVisual = this.add.container(0, 0);
+    const aImg = this.add.image(0, 0, "ui_a").setOrigin(0.5);
+    this.aVisual.add(aImg);
+    this.uiLayer.add(this.aVisual);
+
     const dpadRadius = 70;
-    const aRadius = 34;
+    const aRadius = 48;
+
+    if (dpadImg.width > 0) {
+      const desired = dpadRadius * 2;
+      dpadImg.setScale(desired / dpadImg.width);
+    }
+    if (aImg.width > 0) {
+      const desired = aRadius * 2 * 2.0;
+      aImg.setScale(desired / aImg.width);
+    }
 
     this.dpadHit = this.add.circle(0, 0, dpadRadius, 0x000000, 0.001);
     this.aHit = this.add.circle(0, 0, aRadius, 0x000000, 0.001);
@@ -251,12 +276,19 @@ class RoomScene extends Phaser.Scene {
     this.gameCam.setScroll(0, 0);
     this.uiCam.setViewport(0, 0, canvasW, canvasH);
 
+    if (this.deckBg) {
+      this.deckBg.setPosition(0, deckTop);
+      this.deckBg.setDisplaySize(canvasW, deckHeight);
+    }
+
     const pad = 24;
     const dpadX = pad + 70;
     const dpadY = deckTop + deckHeight / 2;
     const aX = canvasW - (pad + 70);
     const aY = dpadY;
 
+    if (this.dpadVisual) this.dpadVisual.setPosition(dpadX, dpadY);
+    if (this.aVisual) this.aVisual.setPosition(aX, aY);
     this.dpadHit.setPosition(dpadX, dpadY);
     this.aHit.setPosition(aX, aY);
   }
@@ -382,6 +414,7 @@ class RoomScene extends Phaser.Scene {
     const interactPressed =
       Phaser.Input.Keyboard.JustDown(this.keyA) ||
       Phaser.Input.Keyboard.JustDown(this.keySpace) ||
+      Phaser.Input.Keyboard.JustDown(this.keyEnter) ||
       this.touch.interact;
 
     if (interactPressed) {
