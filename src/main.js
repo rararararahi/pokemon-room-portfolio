@@ -1,7 +1,7 @@
 import Phaser from "phaser";
 
 const GAME_W = 320;
-const GAME_H = 320;
+const GAME_H = 240;
 const WORLD_ZOOM = 1;
 const SPEED = 80;
 const PLAYER_SCALE = 2;
@@ -34,8 +34,12 @@ class RoomScene extends Phaser.Scene {
       frameHeight: 16,
     });
     this.load.image("room_pc", "/assets/room/pokeputer.png");
+    this.load.image("ssl", "/assets/room/ssl.png");
+    this.load.image("spkL", "/assets/room/speaker_L.png");
+    this.load.image("spkR", "/assets/room/speaker_R.png");
     this.load.image("ui_dpad", "/assets/ui/dpad.png");
     this.load.image("ui_a", "/assets/ui/abutton.png");
+    this.load.image("floor", "/assets/room/floor.png");
   }
 
   create() {
@@ -43,8 +47,17 @@ class RoomScene extends Phaser.Scene {
     this.worldLayer = this.add.container(0, 0);
     this.uiLayer = this.add.container(0, 0);
 
-    const bg = this.add.rectangle(GAME_W / 2, GAME_H / 2, GAME_W, GAME_H, 0x2b2b44);
-    this.worldLayer.add(bg);
+    const floor = this.add.tileSprite(0, 0, GAME_W, GAME_H, "floor").setOrigin(0, 0);
+    floor.setDepth(0);
+    floor.setPosition(0, 0);
+    if (typeof floor.setTileScale === "function") floor.setTileScale(2, 2);
+    else {
+      floor.tileScaleX = 2;
+      floor.tileScaleY = 2;
+    }
+    floor.setPipeline("TextureTintPipeline");
+    this.textures.get("floor").setFilter(Phaser.Textures.FilterMode.NEAREST);
+    this.worldLayer.add(floor);
 
     this.facing = "down";
     this.idleFrame = { down: 0, up: 0, left: 0, right: 0 };
@@ -94,10 +107,44 @@ class RoomScene extends Phaser.Scene {
     this.physics.add.collider(this.player, topWall);
 
     const CORNER_PAD = 6;
+    const PROP_SCALE = 0.5;
+    const wallY = TOP_WALL_Y + TOP_WALL_H + CORNER_PAD;
+
+    const spkL = this.add.image(0, 0, "spkL").setOrigin(0, 0);
+    const spkR = this.add.image(0, 0, "spkR").setOrigin(0, 0);
+    spkL.setScale(PROP_SCALE * 0.8, PROP_SCALE);
+    spkR.setScale(PROP_SCALE * 0.8, PROP_SCALE);
+    spkL.setPosition(CORNER_PAD, wallY - 10);
+    const GAP = 50;
+    spkR.setPosition(spkL.x + spkL.displayWidth + GAP, wallY - 10);
+    this.worldLayer.add([spkL, spkR]);
+
+    const makeBlocker = (sprite, widthRatio, heightPx, yOffset) => {
+      const blockerW = Math.floor(sprite.displayWidth * widthRatio);
+      const blockerH = heightPx;
+      const base = sprite.getBottomCenter();
+      const blockerX = base.x;
+      const blockerY = base.y + yOffset;
+      const blocker = this.add.rectangle(
+        blockerX,
+        blockerY,
+        blockerW,
+        blockerH,
+        0x00ff00,
+        DEBUG_UI ? 0.25 : 0
+      );
+      this.worldLayer.add(blocker);
+      this.physics.add.existing(blocker, true);
+      this.physics.add.collider(this.player, blocker);
+    };
+
+    makeBlocker(spkL, 0.8, 12, -6);
+    makeBlocker(spkR, 0.8, 12, -6);
+
     const pc = this.add.image(0, 0, "room_pc").setOrigin(0.5, 0.5);
-    pc.setScale(0.5);
+    pc.setScale(PROP_SCALE);
     pc.setOrigin(1, 0);
-    pc.setPosition(GAME_W - CORNER_PAD + 4, TOP_WALL_Y + TOP_WALL_H + CORNER_PAD - 12);
+    pc.setPosition(GAME_W - CORNER_PAD + 4, wallY - 12);
     this.worldLayer.add(pc);
     this.pc = pc;
 
@@ -116,6 +163,26 @@ class RoomScene extends Phaser.Scene {
     this.worldLayer.add(pcBlocker);
     this.physics.add.existing(pcBlocker, true);
     this.physics.add.collider(this.player, pcBlocker);
+
+    const ssl = this.add.image(0, 0, "ssl").setOrigin(0, 0);
+    ssl.setScale(PROP_SCALE * 1.9);
+    const sslY = wallY - 10;
+    const leftBound = spkR.x + spkR.displayWidth + 6;
+    const rightBound = pc.x - pc.displayWidth - 6;
+    const SSL_OFFSET_X = -35;
+    let sslX = leftBound;
+    if (rightBound - leftBound >= ssl.displayWidth) {
+      sslX = leftBound + Math.floor((rightBound - leftBound - ssl.displayWidth) / 2);
+    } else {
+      sslX = Math.max(
+        CORNER_PAD,
+        Math.min(leftBound, GAME_W - CORNER_PAD - ssl.displayWidth)
+      );
+    }
+    sslX += SSL_OFFSET_X;
+    ssl.setPosition(Math.round(sslX), Math.round(sslY));
+    this.worldLayer.add(ssl);
+    makeBlocker(ssl, 0.85, 14, -6);
 
     console.log("pc parent", pc.parentContainer, "pc cam", pc.cameraFilter);
     console.log("player parent", this.player.parentContainer, "player cam", this.player.cameraFilter);
@@ -270,7 +337,7 @@ class RoomScene extends Phaser.Scene {
     const deckTop = canvasH - deckHeight;
 
     const vpX = Math.floor((canvasW - vpW) / 2);
-    const vpY = Math.max(0, Math.floor((deckTop - vpH) / 2));
+    const vpY = Math.max(0, Math.floor((deckTop - vpH) / 2) - 50);
 
     this.gameCam.setViewport(vpX, vpY, vpW, vpH);
     this.gameCam.setScroll(0, 0);
@@ -283,7 +350,7 @@ class RoomScene extends Phaser.Scene {
 
     const pad = 24;
     const dpadX = pad + 70;
-    const dpadY = deckTop + deckHeight / 2;
+    const dpadY = deckTop + deckHeight / 2 - 25;
     const aX = canvasW - (pad + 70);
     const aY = dpadY;
 
