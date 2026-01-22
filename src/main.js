@@ -37,10 +37,11 @@ class RoomScene extends Phaser.Scene {
     });
     this.load.image("room_pc", "/assets/room/pokeputer.png");
     this.load.image("ssl", "/assets/room/ssl.png");
-    this.load.image("spkL", "/assets/room/speaker_L.png");
-    this.load.image("spkR", "/assets/room/speaker_R.png");
+    this.load.image("spkL", "/assets/room/speakerv2_L.png");
+    this.load.image("spkR", "/assets/room/speakerv2_R.png");
     this.load.image("studer", "/assets/room/studer.png");
     this.load.image("studer_controller", "/assets/room/studer_controller.png");
+    this.load.image("couch", "/assets/room/couch.png");
     this.load.image("ui_dpad", "/assets/ui/dpad.png");
     this.load.image("ui_a", "/assets/ui/abutton.png");
     this.load.image("floor", "/assets/room/floor.png");
@@ -125,14 +126,17 @@ class RoomScene extends Phaser.Scene {
 
     const spkL = this.add.image(0, 0, "spkL").setOrigin(0, 0);
     const spkR = this.add.image(0, 0, "spkR").setOrigin(0, 0);
-    spkL.setScale(PROP_SCALE * 0.8, PROP_SCALE);
-    spkR.setScale(PROP_SCALE * 0.8, PROP_SCALE);
-    const SPEAKER_Y = wallY - 10;
+    // Slightly bigger speakers (keep same non-uniform proportions)
+    spkL.setScale(PROP_SCALE * 1.75, PROP_SCALE * 2.2);
+    spkR.setScale(PROP_SCALE * 1.75, PROP_SCALE * 2.2);
+    const SPEAKER_Y = wallY - 15; // shift speakers back 5px (toward top wall)
     const GAP_BASE = 10;
-    const GAP_INNER = -24;
+    // More negative = speakers pull inward (closer to the console)
+    const GAP_INNER = -32;
     const CONSOLE_Y_OFFSET = 24;
     const LAYOUT_SHIFT_X = -37;
-    const consoleX = Math.round(CORNER_PAD + spkL.displayWidth + GAP_BASE + LAYOUT_SHIFT_X + 5);
+    const GROUP_SHIFT_X = -15;
+    const consoleX = Math.round(CORNER_PAD + spkL.displayWidth + GAP_BASE + LAYOUT_SHIFT_X + 5 + GROUP_SHIFT_X);
     this.worldLayer.add([spkL, spkR]);
 
     const makeBlocker = (sprite, widthRatio, heightPx) => {
@@ -184,7 +188,7 @@ class RoomScene extends Phaser.Scene {
     const ssl = this.add.image(0, 0, "ssl").setOrigin(0, 0);
     ssl.setScale(PROP_SCALE * 1.9);
     const sslY = Math.round(SPEAKER_Y + CONSOLE_Y_OFFSET);
-    ssl.setPosition(consoleX, sslY);
+    ssl.setPosition(consoleX + 1, sslY);
     this.worldLayer.add(ssl);
     makeBlocker(ssl, 0.8, 12);
 
@@ -204,7 +208,7 @@ class RoomScene extends Phaser.Scene {
     const STUDER_OFFSET_X = -25;
     const STUDER_OFFSET_Y = 8;
     const studerY = wallY - 10 + STUDER_OFFSET_Y;
-    const pairGap = 4;
+    const pairGap = 12;
     const edgeGap = 6;
     const pairW = this.studerController.displayWidth + pairGap + this.studer.displayWidth;
     const pairLeftBound = ssl.x + ssl.displayWidth + edgeGap;
@@ -225,6 +229,19 @@ class RoomScene extends Phaser.Scene {
     makeBlocker(this.studerController, 0.8, 12);
     makeBlocker(this.studer, 0.8, 12);
 
+    // Couch temporarily disabled
+    const SHOW_COUCH = true;
+    let couch = null;
+    if (SHOW_COUCH) {
+      couch = this.add.image(0, 0, "couch").setOrigin(0, 0);
+      couch.setScale(PROP_SCALE * 3);
+      const couchX = CORNER_PAD - 5;
+      const couchY = Math.round(GAME_H / 2 - couch.displayHeight / 2 + 86);
+      couch.setPosition(couchX, couchY);
+      this.worldLayer.add(couch);
+      makeBlocker(couch, 0.95, 16);
+    }
+
     addInteractable({
       id: "pc",
       sprite: pc,
@@ -240,6 +257,13 @@ class RoomScene extends Phaser.Scene {
         return new Phaser.Geom.Rectangle(bounds.x, bounds.bottom, bounds.width, stripH);
       },
     });
+    if (couch) {
+      addInteractable({
+        id: "couch",
+        sprite: couch,
+        text: "This couch has seen a lot of late nights...",
+      });
+    }
     addInteractable({
       id: "studer",
       sprite: this.studer,
