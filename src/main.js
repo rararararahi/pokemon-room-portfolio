@@ -4,6 +4,8 @@ const GAME_W = 320;
 const GAME_H = 240;
 const WORLD_ZOOM = 1;
 const SPEED = 80;
+const RUN_MULT = 1.8;
+const RUN_HOLD_MS = 150;
 const PLAYER_SCALE = 2;
 const FEET_W = 10;
 const FEET_H = 8;
@@ -37,6 +39,8 @@ class RoomScene extends Phaser.Scene {
     this.load.image("ssl", "/assets/room/ssl.png");
     this.load.image("spkL", "/assets/room/speaker_L.png");
     this.load.image("spkR", "/assets/room/speaker_R.png");
+    this.load.image("studer", "/assets/room/studer.png");
+    this.load.image("studer_controller", "/assets/room/studer_controller.png");
     this.load.image("ui_dpad", "/assets/ui/dpad.png");
     this.load.image("ui_a", "/assets/ui/abutton.png");
     this.load.image("floor", "/assets/room/floor.png");
@@ -77,11 +81,20 @@ class RoomScene extends Phaser.Scene {
     this.cursors = this.input.keyboard.createCursorKeys();
     this.keyA = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.A);
     this.keySpace = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
-    this.keyEnter = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.ENTER);
+    this.keyShift = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SHIFT);
+    // Enable multi-touch (needed to hold D-pad with one finger while pressing A with another).
+    // Default is often 1 touch pointer; we want a few.
+    this.input.addPointer(3);
 
     this.touch = { left: false, right: false, up: false, down: false, interact: false };
     this.lastPressedTime = { left: 0, right: 0, up: 0, down: 0 };
     this.inputTick = 0;
+    this.pendingInteractUntil = 0;
+    this.uiBound = false;
+    this.aIsDown = false;
+    this.aDownAt = 0;
+    this.runHeld = false;
+    this.runArmTimer = null;
 
     this.gameCam = this.cameras.main;
     this.uiCam = this.cameras.add(0, 0, this.scale.width, this.scale.height);
@@ -114,17 +127,20 @@ class RoomScene extends Phaser.Scene {
     const spkR = this.add.image(0, 0, "spkR").setOrigin(0, 0);
     spkL.setScale(PROP_SCALE * 0.8, PROP_SCALE);
     spkR.setScale(PROP_SCALE * 0.8, PROP_SCALE);
-    spkL.setPosition(CORNER_PAD, wallY - 10);
-    const GAP = 50;
-    spkR.setPosition(spkL.x + spkL.displayWidth + GAP, wallY - 10);
+    const SPEAKER_Y = wallY - 10;
+    const GAP_BASE = 10;
+    const GAP_INNER = -24;
+    const CONSOLE_Y_OFFSET = 24;
+    const LAYOUT_SHIFT_X = -37;
+    const consoleX = Math.round(CORNER_PAD + spkL.displayWidth + GAP_BASE + LAYOUT_SHIFT_X + 5);
     this.worldLayer.add([spkL, spkR]);
 
-    const makeBlocker = (sprite, widthRatio, heightPx, yOffset) => {
+    const makeBlocker = (sprite, widthRatio, heightPx) => {
       const blockerW = Math.floor(sprite.displayWidth * widthRatio);
       const blockerH = heightPx;
       const base = sprite.getBottomCenter();
       const blockerX = base.x;
-      const blockerY = base.y + yOffset;
+      const blockerY = base.y - Math.floor(blockerH / 2);
       const blocker = this.add.rectangle(
         blockerX,
         blockerY,
@@ -136,10 +152,26 @@ class RoomScene extends Phaser.Scene {
       this.worldLayer.add(blocker);
       this.physics.add.existing(blocker, true);
       this.physics.add.collider(this.player, blocker);
+      const baseY = blocker.getBottomCenter().y;
+      sprite.setDepth(baseY);
+      blocker.setDepth(baseY);
+      sprite.blocker = blocker;
+      return blocker;
     };
 
-    makeBlocker(spkL, 0.8, 12, -6);
-    makeBlocker(spkR, 0.8, 12, -6);
+    this.interactables = [];
+    this.interactCandidate = null;
+    this.lastCandidate = null;
+    this.lastCandidateTime = 0;
+    this.prevTouchInteract = false;
+    const addInteractable = ({ id, sprite, text, getInteractRect }) => {
+      const base = sprite.blocker ? sprite.blocker.getBottomCenter() : sprite.getBottomCenter();
+      const interactPointX = Math.round(base.x);
+      const interactPointY = Math.round(base.y + 6);
+      const entry = { id, sprite, text, interactPointX, interactPointY, getInteractRect };
+      this.interactables.push(entry);
+      return entry;
+    };
 
     const pc = this.add.image(0, 0, "room_pc").setOrigin(0.5, 0.5);
     pc.setScale(PROP_SCALE);
@@ -147,63 +179,116 @@ class RoomScene extends Phaser.Scene {
     pc.setPosition(GAME_W - CORNER_PAD + 4, wallY - 12);
     this.worldLayer.add(pc);
     this.pc = pc;
-
-    const blockerW = Math.floor(pc.displayWidth * 0.85);
-    const blockerH = 14;
-    const blockerX = pc.getBottomCenter().x;
-    const blockerY = pc.getBottomCenter().y - 6;
-    const pcBlocker = this.add.rectangle(
-      blockerX,
-      blockerY,
-      blockerW,
-      blockerH,
-      0x00ff00,
-      DEBUG_UI ? 0.25 : 0
-    );
-    this.worldLayer.add(pcBlocker);
-    this.physics.add.existing(pcBlocker, true);
-    this.physics.add.collider(this.player, pcBlocker);
+    makeBlocker(pc, 0.8, 12);
 
     const ssl = this.add.image(0, 0, "ssl").setOrigin(0, 0);
     ssl.setScale(PROP_SCALE * 1.9);
-    const sslY = wallY - 10;
-    const leftBound = spkR.x + spkR.displayWidth + 6;
-    const rightBound = pc.x - pc.displayWidth - 6;
-    const SSL_OFFSET_X = -35;
-    let sslX = leftBound;
-    if (rightBound - leftBound >= ssl.displayWidth) {
-      sslX = leftBound + Math.floor((rightBound - leftBound - ssl.displayWidth) / 2);
-    } else {
-      sslX = Math.max(
-        CORNER_PAD,
-        Math.min(leftBound, GAME_W - CORNER_PAD - ssl.displayWidth)
-      );
-    }
-    sslX += SSL_OFFSET_X;
-    ssl.setPosition(Math.round(sslX), Math.round(sslY));
+    const sslY = Math.round(SPEAKER_Y + CONSOLE_Y_OFFSET);
+    ssl.setPosition(consoleX, sslY);
     this.worldLayer.add(ssl);
-    makeBlocker(ssl, 0.85, 14, -6);
+    makeBlocker(ssl, 0.8, 12);
+
+    const spkLX = Math.round(consoleX - spkL.displayWidth - GAP_INNER - 10);
+    const spkRX = Math.round(consoleX + ssl.displayWidth + GAP_INNER + 12);
+    spkL.setPosition(spkLX, Math.round(SPEAKER_Y));
+    spkR.setPosition(spkRX, Math.round(SPEAKER_Y));
+
+    makeBlocker(spkL, 0.8, 12);
+    makeBlocker(spkR, 0.8, 12);
+
+    this.studer = this.add.image(0, 0, "studer").setOrigin(0, 0);
+    this.studerController = this.add.image(0, 0, "studer_controller").setOrigin(0, 0);
+    const STUDER_SCALE = PROP_SCALE * 2;
+    this.studer.setScale(STUDER_SCALE * (2 / 3) * 1.05);
+    this.studerController.setScale(STUDER_SCALE * 1.05);
+    const STUDER_OFFSET_X = -25;
+    const STUDER_OFFSET_Y = 8;
+    const studerY = wallY - 10 + STUDER_OFFSET_Y;
+    const pairGap = 4;
+    const edgeGap = 6;
+    const pairW = this.studerController.displayWidth + pairGap + this.studer.displayWidth;
+    const pairLeftBound = ssl.x + ssl.displayWidth + edgeGap;
+    const pairRightBound = pc.x - pc.displayWidth - edgeGap;
+    let pairX = pairLeftBound;
+    if (pairRightBound - pairLeftBound >= pairW) {
+      pairX = pairLeftBound + Math.floor((pairRightBound - pairLeftBound - pairW) / 2);
+    } else {
+      pairX = Math.max(pairLeftBound, pairRightBound - pairW);
+    }
+    pairX -= 15;
+    this.studerController.setPosition(Math.round(pairX + STUDER_OFFSET_X), Math.round(studerY));
+    this.studer.setPosition(
+      Math.round(this.studerController.x + this.studerController.displayWidth + pairGap),
+      Math.round(studerY)
+    );
+    this.worldLayer.add([this.studerController, this.studer]);
+    makeBlocker(this.studerController, 0.8, 12);
+    makeBlocker(this.studer, 0.8, 12);
+
+    addInteractable({
+      id: "pc",
+      sprite: pc,
+      text: "Computer...",
+    });
+    addInteractable({
+      id: "console",
+      sprite: ssl,
+      text: "MIX ACTIVE: DO NOT TOUCH!!!",
+      getInteractRect: () => {
+        const bounds = ssl.getBounds();
+        const stripH = 10;
+        return new Phaser.Geom.Rectangle(bounds.x, bounds.bottom, bounds.width, stripH);
+      },
+    });
+    addInteractable({
+      id: "studer",
+      sprite: this.studer,
+      text: "This is ancient technology... Maybe I should try a plugin...",
+    });
+    addInteractable({
+      id: "studer_controller",
+      sprite: this.studerController,
+      text: "*click* ~a faint whirring sound is coming from the tape machine.~",
+    });
+
+    if (DEBUG_UI) {
+      this.interactProbe = this.add.circle(0, 0, 2, 0xff00ff, 1);
+      this.interactProbe.setDepth(9999);
+      this.worldLayer.add(this.interactProbe);
+      this.interactCandidateOutline = this.add.rectangle(0, 0, 10, 10, 0x000000, 0);
+      this.interactCandidateOutline.setStrokeStyle(1, 0xffff00);
+      this.interactCandidateOutline.setDepth(9998);
+      this.worldLayer.add(this.interactCandidateOutline);
+    }
 
     console.log("pc parent", pc.parentContainer, "pc cam", pc.cameraFilter);
     console.log("player parent", this.player.parentContainer, "player cam", this.player.cameraFilter);
 
-    const zoneW = Math.round(pc.displayWidth * 0.9);
-    const zoneH = Math.round(pc.displayHeight * 0.35);
-    const zoneX = pc.x - pc.displayWidth / 2;
-    const zoneY = pc.y + pc.displayHeight + zoneH / 2 - 2;
-    this.pcZone = this.add.zone(zoneX, zoneY, zoneW, zoneH);
-    this.physics.add.existing(this.pcZone, true);
-
     this.createControls();
 
     this.dialogOpen = false;
-    this.dialogText = this.add.text(12, 12, "", {
+    this.dialogTyping = false;
+    this.fullDialogText = "";
+    this.dialogWrappedText = "";
+    this.typeIndex = 0;
+    this.typeTimer = null;
+    this.dialogTween = null;
+    this.dialogSlideOffsetY = 0;
+    this.typeDelayMs = 32;
+    this.wrapProbeText = null;
+    this.dialogContainer = this.add.container(0, 0);
+    this.dialogBorder = this.add.rectangle(0, 0, 10, 10, 0x111111).setOrigin(0, 0);
+    this.dialogFill = this.add.rectangle(0, 0, 10, 10, 0xffffff).setOrigin(0, 0);
+    this.dialogText = this.add.text(0, 0, "", {
       fontFamily: "monospace",
       fontSize: "14px",
-      color: "#ffffff",
+      color: "#111111",
+      lineSpacing: 2,
+      wordWrap: { width: 100 },
     });
-    this.dialogText.setVisible(false);
-    this.uiLayer.add(this.dialogText);
+    this.dialogContainer.add([this.dialogBorder, this.dialogFill, this.dialogText]);
+    this.dialogContainer.setVisible(false);
+    this.uiLayer.add(this.dialogContainer);
 
     this.anims.create({
       key: "walk_down",
@@ -220,13 +305,13 @@ class RoomScene extends Phaser.Scene {
     this.anims.create({
       key: "walk_left",
       frames: this.anims.generateFrameNumbers("p_left", { start: 0, end: 1 }),
-      frameRate: 12,
+      frameRate: 8,
       repeat: -1,
     });
     this.anims.create({
       key: "walk_right",
       frames: this.anims.generateFrameNumbers("p_right", { start: 0, end: 1 }),
-      frameRate: 12,
+      frameRate: 8,
       repeat: -1,
     });
 
@@ -235,6 +320,9 @@ class RoomScene extends Phaser.Scene {
   }
 
   createControls() {
+    if (this.uiBound) return;
+    this.uiBound = true;
+
     this.deckBg = this.add.rectangle(0, 0, 10, 10, 0x000000).setOrigin(0, 0);
     this.uiLayer.add(this.deckBg);
 
@@ -249,21 +337,23 @@ class RoomScene extends Phaser.Scene {
     this.uiLayer.add(this.aVisual);
 
     const dpadRadius = 70;
-    const aRadius = 48;
+    const aVisualRadius = 48;
+    const aHitRadius = 72;
 
     if (dpadImg.width > 0) {
       const desired = dpadRadius * 2;
       dpadImg.setScale(desired / dpadImg.width);
     }
     if (aImg.width > 0) {
-      const desired = aRadius * 2 * 2.0;
+      const desired = aVisualRadius * 2 * 2.0;
       aImg.setScale(desired / aImg.width);
     }
 
     this.dpadHit = this.add.circle(0, 0, dpadRadius, 0x000000, 0.001);
-    this.aHit = this.add.circle(0, 0, aRadius, 0x000000, 0.001);
-    this.dpadHit.setInteractive();
-    this.aHit.setInteractive();
+    this.aHit = this.add.circle(0, 0, aHitRadius, 0x000000, 0.001);
+    // Make both controls independently touchable.
+    this.dpadHit.setInteractive({ useHandCursor: false });
+    this.aHit.setInteractive({ useHandCursor: false });
 
     this.uiLayer.add([this.dpadHit, this.aHit]);
 
@@ -271,6 +361,7 @@ class RoomScene extends Phaser.Scene {
     const deadzone = 10;
 
     const handleDpadPointer = (pointer) => {
+      if (this.dialogOpen) return;
       const bounds = this.dpadHit.getBounds();
       const cx = bounds.centerX;
       const cy = bounds.centerY;
@@ -299,6 +390,7 @@ class RoomScene extends Phaser.Scene {
     };
 
     this.dpadHit.on("pointerdown", (ptr) => {
+      if (this.dialogOpen) return;
       if (this.dpadPointerId != null) return;
       this.dpadPointerId = ptr.id;
       handleDpadPointer(ptr);
@@ -320,8 +412,61 @@ class RoomScene extends Phaser.Scene {
     this.input.on("pointerupoutside", clearDpad);
     this.input.on("pointercancel", clearDpad);
 
-    this.aHit.on("pointerdown", () => (this.touch.interact = true));
-    this.aHit.on("pointerup", () => (this.touch.interact = false));
+    this.aHit.on("pointerdown", (p) => {
+      p.event?.preventDefault?.();
+      p.event?.stopPropagation?.();
+
+      const now = this.time.now;
+
+      // If dialog is open, A always advances/closes immediately (no running).
+      if (this.dialogOpen) {
+        this.handleA(now);
+        return;
+      }
+
+      // Arm a hold-to-run gesture on mobile.
+      this.aIsDown = true;
+      this.aDownAt = now;
+      this.runHeld = false;
+
+      if (this.runArmTimer) {
+        this.runArmTimer.remove(false);
+        this.runArmTimer = null;
+      }
+
+      this.runArmTimer = this.time.delayedCall(RUN_HOLD_MS, () => {
+        // Only start running if still held and no dialog popped.
+        if (this.aIsDown && !this.dialogOpen) {
+          this.runHeld = true;
+        }
+      });
+    });
+
+    const endAHold = (p) => {
+      // End running on release.
+      const now = this.time.now;
+      const wasDown = this.aIsDown;
+      const heldMs = wasDown ? now - this.aDownAt : 0;
+
+      this.aIsDown = false;
+      const wasRunning = this.runHeld;
+      this.runHeld = false;
+
+      if (this.runArmTimer) {
+        this.runArmTimer.remove(false);
+        this.runArmTimer = null;
+      }
+
+      // Treat short press as a tap-to-interact.
+      // If it was a run hold, do NOT trigger dialog.
+      if (!this.dialogOpen && wasDown && !wasRunning && heldMs < RUN_HOLD_MS) {
+        this.handleA(now);
+      }
+    };
+
+    this.aHit.on("pointerup", endAHold);
+    this.aHit.on("pointerupoutside", endAHold);
+    this.aHit.on("pointerout", endAHold);
   }
 
   layout() {
@@ -343,6 +488,29 @@ class RoomScene extends Phaser.Scene {
     this.gameCam.setScroll(0, 0);
     this.uiCam.setViewport(0, 0, canvasW, canvasH);
 
+    if (this.dialogContainer && this.dialogBorder && this.dialogFill && this.dialogText) {
+      const margin = 8;
+      const border = 4;
+      const pad = 6;
+      const boxW = Math.round(vpW * 0.93);
+      const boxH = Math.round(vpH * 0.27);
+      const boxX = Math.round(vpX + (vpW - boxW) / 2);
+      const boxY = Math.round(vpY + vpH - boxH - margin);
+      this.dialogBorder.setPosition(boxX, boxY);
+      this.dialogBorder.setSize(boxW, boxH);
+      this.dialogFill.setPosition(boxX + border, boxY + border);
+      this.dialogFill.setSize(
+        Math.max(4, boxW - border * 2),
+        Math.max(4, boxH - border * 2)
+      );
+      const textX = boxX + border + pad;
+      const textY = boxY + border + pad + 1;
+      const textW = Math.max(4, boxW - 2 * (border + pad));
+      this.dialogText.setPosition(textX, textY);
+      this.dialogText.setWordWrapWidth(textW);
+      this.dialogSlideOffsetY = Math.max(0, vpY + vpH - boxY + 4);
+    }
+
     if (this.deckBg) {
       this.deckBg.setPosition(0, deckTop);
       this.deckBg.setDisplaySize(canvasW, deckHeight);
@@ -358,6 +526,217 @@ class RoomScene extends Phaser.Scene {
     if (this.aVisual) this.aVisual.setPosition(aX, aY);
     this.dpadHit.setPosition(dpadX, dpadY);
     this.aHit.setPosition(aX, aY);
+  }
+
+  updateInteractCandidate(now) {
+    const feet = this.player.getBottomCenter();
+    const FACE_OFFSET = 12;
+    let fx = feet.x;
+    let fy = feet.y;
+    let faceX = 0;
+    let faceY = 0;
+    if (this.facing === "up") {
+      fy -= FACE_OFFSET;
+      faceY = -1;
+    } else if (this.facing === "down") {
+      fy += FACE_OFFSET;
+      faceY = 1;
+    } else if (this.facing === "left") {
+      fx -= FACE_OFFSET;
+      faceX = -1;
+    } else if (this.facing === "right") {
+      fx += FACE_OFFSET;
+      faceX = 1;
+    }
+
+    let bestCandidate = null;
+    let bestDistSq = Number.POSITIVE_INFINITY;
+    const MAX_INTERACT_DIST = 20;
+    const MAX_DIST_SQ = MAX_INTERACT_DIST * MAX_INTERACT_DIST;
+    const FRONT_TOL = -4;
+    for (const entry of this.interactables) {
+      if (entry.getInteractRect) {
+        const rect = entry.getInteractRect();
+        const body = this.player.body;
+        const feetRect = body
+          ? new Phaser.Geom.Rectangle(body.x, body.y, body.width, body.height)
+          : new Phaser.Geom.Rectangle(feet.x, feet.y, 1, 1);
+        if (rect && Phaser.Geom.Rectangle.Overlaps(rect, feetRect)) {
+          bestCandidate = entry;
+          bestDistSq = 0;
+        }
+        continue;
+      }
+      const vx = entry.interactPointX - feet.x;
+      const vy = entry.interactPointY - feet.y;
+      const dot = vx * faceX + vy * faceY;
+      if (dot < FRONT_TOL) continue;
+      const dx = entry.interactPointX - fx;
+      const dy = entry.interactPointY - fy;
+      const distSq = dx * dx + dy * dy;
+      if (distSq <= MAX_DIST_SQ && distSq < bestDistSq) {
+        bestDistSq = distSq;
+        bestCandidate = entry;
+      }
+    }
+
+    this.interactCandidate = bestCandidate;
+    if (bestCandidate) {
+      this.lastCandidate = bestCandidate;
+      this.lastCandidateTime = now;
+    }
+
+    const COYOTE_MS = 200;
+    let effectiveCandidate = bestCandidate;
+    if (!effectiveCandidate && this.lastCandidate && now - this.lastCandidateTime <= COYOTE_MS) {
+      effectiveCandidate = this.lastCandidate;
+    }
+
+    if (DEBUG_UI && this.interactProbe) {
+      this.interactProbe.setPosition(Math.round(fx), Math.round(fy));
+    }
+    if (DEBUG_UI && this.interactCandidateOutline) {
+      if (bestCandidate) {
+        const b = bestCandidate.sprite.getBounds();
+        this.interactCandidateOutline.setPosition(b.centerX, b.centerY);
+        this.interactCandidateOutline.setSize(b.width, b.height);
+        this.interactCandidateOutline.setVisible(true);
+      } else {
+        this.interactCandidateOutline.setVisible(false);
+      }
+    }
+
+    return effectiveCandidate;
+  }
+
+  getWrappedDialogText(text) {
+    const wrapWidth =
+      this.dialogText?.style?.wordWrapWidth ?? this.dialogText?.style?.wordWrap?.width ?? 0;
+    if (this.dialogText?.getWrappedText) {
+      const wrapped = this.dialogText.getWrappedText(text);
+      if (Array.isArray(wrapped)) return wrapped.join("\n");
+      if (typeof wrapped === "string") return wrapped;
+    }
+
+    if (!this.wrapProbeText) {
+      this.wrapProbeText = this.add.text(-1000, -1000, "", {
+        fontFamily: this.dialogText.style.fontFamily,
+        fontSize: this.dialogText.style.fontSize,
+        color: this.dialogText.style.color,
+        lineSpacing: this.dialogText.style.lineSpacing,
+        wordWrap: { width: wrapWidth },
+      });
+      this.wrapProbeText.setVisible(false);
+    }
+
+    if (wrapWidth) this.wrapProbeText.setWordWrapWidth(wrapWidth);
+    this.wrapProbeText.setText(text);
+
+    if (this.wrapProbeText.getWrappedText) {
+      const wrapped = this.wrapProbeText.getWrappedText(text);
+      if (Array.isArray(wrapped)) return wrapped.join("\n");
+      if (typeof wrapped === "string") return wrapped;
+    }
+
+    const bounds = this.wrapProbeText.getTextBounds?.(true);
+    if (bounds?.lines?.length) return bounds.lines.join("\n");
+
+    return text;
+  }
+
+  getTypeDelayForChar(char) {
+    if (char === "\n") return this.typeDelayMs + 110;
+    if (char === "." || char === "," || char === "!" || char === "?") {
+      return this.typeDelayMs + 110;
+    }
+    return this.typeDelayMs;
+  }
+
+  startTypewriter() {
+    if (this.typeTimer) {
+      this.typeTimer.remove(false);
+      this.typeTimer = null;
+    }
+    const tick = () => {
+      if (!this.dialogTyping) return;
+      const nextIndex = Math.min(this.typeIndex + 1, this.dialogWrappedText.length);
+      this.typeIndex = nextIndex;
+      this.dialogText.setText(this.dialogWrappedText.slice(0, this.typeIndex));
+      if (this.typeIndex >= this.dialogWrappedText.length) {
+        this.finishTyping();
+        return;
+      }
+      const lastChar = this.dialogWrappedText[this.typeIndex - 1];
+      const delay = this.getTypeDelayForChar(lastChar);
+      this.typeTimer = this.time.delayedCall(delay, tick);
+    };
+    this.typeTimer = this.time.delayedCall(this.typeDelayMs, tick);
+  }
+
+  finishTyping() {
+    if (!this.dialogTyping) return;
+    this.dialogTyping = false;
+    this.typeIndex = this.dialogWrappedText.length;
+    this.dialogText.setText(this.dialogWrappedText);
+    if (this.typeTimer) {
+      this.typeTimer.remove(false);
+      this.typeTimer = null;
+    }
+  }
+
+  closeDialog() {
+    if (!this.dialogOpen) return;
+    this.finishTyping();
+    if (this.dialogTween) {
+      this.dialogTween.stop();
+      this.dialogTween = null;
+    }
+    this.dialogContainer.setVisible(false);
+    this.runHeld = false;
+    this.aIsDown = false;
+    this.dialogOpen = false;
+  }
+
+  openDialog(candidate) {
+    const text = typeof candidate === "string" ? candidate : candidate?.text;
+    if (!text) return;
+    this.dialogOpen = true;
+    this.dialogTyping = true;
+    this.fullDialogText = text;
+    this.dialogWrappedText = this.getWrappedDialogText(text);
+    this.typeIndex = 0;
+    this.dialogText.setText("");
+    this.dialogContainer.setVisible(true);
+    this.pendingInteractUntil = 0;
+    this.runHeld = false;
+    this.aIsDown = false;
+
+    this.dialogContainer.y = this.dialogSlideOffsetY || 0;
+    if (this.dialogTween) this.dialogTween.stop();
+    this.dialogTween = this.tweens.add({
+      targets: this.dialogContainer,
+      y: 0,
+      duration: 150,
+      ease: "Sine.Out",
+    });
+
+    this.startTypewriter();
+  }
+
+  handleA(timeNow) {
+    if (this.dialogOpen) {
+      if (this.dialogTyping) this.finishTyping();
+      else this.closeDialog();
+      return;
+    }
+
+    const candidate = this.updateInteractCandidate(timeNow);
+    if (!candidate) {
+      this.pendingInteractUntil = timeNow + 300;
+      return;
+    }
+
+    this.openDialog(candidate);
   }
 
   setFacing(direction) {
@@ -414,6 +793,43 @@ class RoomScene extends Phaser.Scene {
   update() {
     this.inputTick += 1;
 
+    const now = this.time.now;
+    const keyJustPressed =
+      Phaser.Input.Keyboard.JustDown(this.keyA) ||
+      Phaser.Input.Keyboard.JustDown(this.keySpace);
+
+    const freezePlayer = () => {
+      this.touch.interact = false;
+      this.runHeld = false;
+      const body = this.player.body;
+      body.setVelocity(0);
+      this.stopWalk();
+      const playerBaseY = this.player.body ? this.player.body.bottom : this.player.y;
+      this.player.setDepth(playerBaseY);
+      if (this.worldLayer?.sort) this.worldLayer.sort("depth");
+    };
+
+    if (this.dialogOpen) {
+      if (keyJustPressed) this.handleA(now);
+      freezePlayer();
+      return;
+    }
+
+    const effectiveCandidate = this.updateInteractCandidate(now);
+    if (!this.dialogOpen && this.pendingInteractUntil > now && effectiveCandidate) {
+      this.openDialog(effectiveCandidate);
+      freezePlayer();
+      return;
+    }
+
+    if (keyJustPressed) {
+      this.handleA(now);
+      if (this.dialogOpen) {
+        freezePlayer();
+        return;
+      }
+    }
+
     const leftPressed = this.cursors.left.isDown || this.touch.left;
     const rightPressed = this.cursors.right.isDown || this.touch.right;
     const upPressed = this.cursors.up.isDown || this.touch.up;
@@ -468,38 +884,29 @@ class RoomScene extends Phaser.Scene {
     if (movingDir) this.setFacing(movingDir);
 
     const body = this.player.body;
+
+    // Run is held on mobile via A-hold, and on keyboard via Shift.
+    const isRunActive = (this.keyShift && this.keyShift.isDown) || this.runHeld;
+    const moveSpeed = isRunActive ? SPEED * RUN_MULT : SPEED;
+
     body.setVelocity(0);
-    if (moveX !== 0) body.setVelocityX(moveX * SPEED);
-    if (moveY !== 0) body.setVelocityY(moveY * SPEED);
-    body.velocity.normalize().scale(SPEED);
+    if (moveX !== 0) body.setVelocityX(moveX * moveSpeed);
+    if (moveY !== 0) body.setVelocityY(moveY * moveSpeed);
+    body.velocity.normalize().scale(moveSpeed);
+
+    // Speed up walk animation when running.
+    this.player.anims.timeScale = isRunActive ? RUN_MULT : 1.0;
 
     const isMoving = body.velocity.lengthSq() > 0.1;
     if (isMoving && movingDir) this.playWalk(movingDir);
     else this.stopWalk();
-
-    const inPC = this.pcZone ? this.physics.overlap(this.player, this.pcZone) : false;
-    const interactPressed =
-      Phaser.Input.Keyboard.JustDown(this.keyA) ||
-      Phaser.Input.Keyboard.JustDown(this.keySpace) ||
-      Phaser.Input.Keyboard.JustDown(this.keyEnter) ||
-      this.touch.interact;
-
-    if (interactPressed) {
-      if (this.dialogOpen) {
-        this.dialogText.setVisible(false);
-        this.dialogOpen = false;
-      } else if (inPC) {
-        this.dialogText.setText("Computer...");
-        this.dialogText.setVisible(true);
-        this.dialogOpen = true;
-      }
-    }
+    if (!isMoving) this.player.anims.timeScale = 1.0;
 
     this.touch.interact = false;
 
-    const parent = this.player.parentContainer;
-    if (parent) parent.bringToTop(this.player);
-    else this.children.bringToTop(this.player);
+    const playerBaseY = this.player.body ? this.player.body.bottom : this.player.y;
+    this.player.setDepth(playerBaseY);
+    if (this.worldLayer?.sort) this.worldLayer.sort("depth");
   }
 }
 
