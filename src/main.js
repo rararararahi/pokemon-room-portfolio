@@ -32,10 +32,14 @@ class ComputerShop {
 
     // Preview audio. iOS requires a user gesture before play() will succeed.
     this.audioUnlocked = false;
+    this.audioUnlockSrc = "/previews/in_the_club_128bpm.mp3";
     this.audio = new Audio();
     this.audio.preload = "none";
     this.audio.loop = true;
     this.audio.volume = 0.9;
+
+    this.rowHits = [];
+    this._listAnchor = null;
 
     // UI container (lives in uiLayer)
     this.container = scene.add.container(0, 0);
@@ -59,6 +63,16 @@ class ComputerShop {
     // Main panel
     this.panelBorder = scene.add.rectangle(0, 0, 10, 10, 0x111111).setOrigin(0, 0);
     this.panelFill = scene.add.rectangle(0, 0, 10, 10, 0xffffff).setOrigin(0, 0);
+
+    // Top-left metadata box (Pokémon mart-style)
+    this.metaBorder = scene.add.rectangle(0, 0, 10, 10, 0x111111).setOrigin(0, 0);
+    this.metaFill = scene.add.rectangle(0, 0, 10, 10, 0xffffff).setOrigin(0, 0);
+    this.metaText = scene.add.text(0, 0, "", {
+      fontFamily: "monospace",
+      fontSize: "12px",
+      color: "#111111",
+      lineSpacing: 2,
+    });
 
     this.title = scene.add.text(0, 0, "POKEPUTER", {
       fontFamily: "monospace",
@@ -93,6 +107,9 @@ class ComputerShop {
       this.dim,
       this.panelBorder,
       this.panelFill,
+      this.metaBorder,
+      this.metaFill,
+      this.metaText,
       this.title,
       this.list,
       this.hint,
@@ -166,43 +183,83 @@ class ComputerShop {
     this.dim.disableInteractive();
     this.stopPreview();
     this.hideConfirm();
+    this.updateRowHits(0);
   }
 
   // Call this from an actual user gesture (pointer/key) to satisfy iOS.
-  unlockAudio() {
+  unlockAudioFromGesture() {
     if (this.audioUnlocked) return;
-    this.audioUnlocked = true;
-    // Attempt to start current selection immediately.
-    this.autoplaySelection();
+    const audio = this.audio;
+    const onSuccess = () => {
+      audio.pause();
+      audio.currentTime = 0;
+      audio.muted = false;
+      audio.loop = true;
+      this.audioUnlocked = true;
+      if (this.isOpen) this.autoplaySelection();
+    };
+    const onFailure = () => {
+      audio.muted = false;
+      audio.loop = true;
+      this.audioUnlocked = false;
+    };
+
+    try {
+      const unlockSrc = this.selectedItem()?.preview || this.audioUnlockSrc;
+      if (!unlockSrc) return;
+      audio.src = unlockSrc;
+      audio.muted = true;
+      audio.loop = false;
+      const p = audio.play();
+      if (p && typeof p.then === "function") {
+        p.then(onSuccess).catch(onFailure);
+      } else {
+        onSuccess();
+      }
+    } catch {
+      onFailure();
+    }
   }
 
   layout(gameCam) {
     const scene = this.scene;
 
-    // Phaser camera `viewport` can be undefined early (before setViewport runs).
-    // Fall back to the full canvas so we never crash during create().
-    const vp = (gameCam && gameCam.viewport) ? gameCam.viewport : {
-      x: 0,
-      y: 0,
-      width: scene.scale.width,
-      height: scene.scale.height,
-    };
+    // Prefer camera viewport position/size via camera.x/y/width/height.
+    // On some mobile builds, `camera.viewport` can be undefined or not reflect setViewport.
+    // We want the shop confined strictly to the GBA screen (game camera viewport).
+    let vpX = 0;
+    let vpY = 0;
+    let vpW = scene.scale.width;
+    let vpH = scene.scale.height;
 
-    const vpX = vp.x ?? 0;
-    const vpY = vp.y ?? 0;
-    const vpW = vp.width ?? scene.scale.width;
-    const vpH = vp.height ?? scene.scale.height;
+    if (
+      gameCam &&
+      Number.isFinite(gameCam.x) &&
+      Number.isFinite(gameCam.y) &&
+      Number.isFinite(gameCam.width) &&
+      Number.isFinite(gameCam.height) &&
+      gameCam.width > 0 &&
+      gameCam.height > 0
+    ) {
+      vpX = Math.round(gameCam.x);
+      vpY = Math.round(gameCam.y);
+      vpW = Math.round(gameCam.width);
+      vpH = Math.round(gameCam.height);
+    }
 
-    this.dim.setPosition(0, 0);
-    this.dim.setSize(scene.scale.width, scene.scale.height);
+    // IMPORTANT: keep the shop overlay confined to the GBA screen (game camera viewport)
+    // so the on-screen D-pad/A controls (in the bottom deck area) remain tappable.
+    this.dim.setPosition(vpX, vpY);
+    this.dim.setSize(vpW, vpH);
 
     const border = 4;
     const pad = 8;
 
-    const panelW = Math.round(vpW * 0.94);
-    const panelH = Math.round(vpH * 0.78);
-    const panelX = Math.round(vpX + (vpW - panelW) / 2);
-    const panelY = Math.round(vpY + (vpH - panelH) / 2 - 6);
+    // Fill the GBA screen with a small inset border, Pokémon-style.
+    const panelX = Math.round(vpX + 4);
+    const panelY = Math.round(vpY + 4);
+    const panelW = Math.round(vpW - 8);
+    const panelH = Math.round(vpH - 8);
 
     this.panelBorder.setPosition(panelX, panelY);
     this.panelBorder.setSize(panelW, panelH);
@@ -210,10 +267,42 @@ class ComputerShop {
     this.panelFill.setPosition(panelX + border, panelY + border);
     this.panelFill.setSize(panelW - border * 2, panelH - border * 2);
 
-    this.title.setPosition(panelX + border + pad, panelY + border + pad);
+    // Meta box dims (top-left, like the mart money box)
+    const metaW = Math.min(150, Math.floor(panelW * 0.46));
+    const metaH = 64;
+    const metaX = Math.round(panelX + border + pad);
+    const metaY = Math.round(panelY + border + pad);
 
-    this.list.setPosition(panelX + border + pad, panelY + border + pad + 22);
-    this.hint.setPosition(panelX + border + pad, panelY + panelH - border - pad - 14);
+    this.metaBorder.setPosition(metaX, metaY);
+    this.metaBorder.setSize(metaW, metaH);
+
+    this.metaFill.setPosition(metaX + border, metaY + border);
+    this.metaFill.setSize(metaW - border * 2, metaH - border * 2);
+
+    this.metaText.setPosition(metaX + border + 6, metaY + border + 5);
+    this.metaText.setWordWrapWidth(Math.max(10, metaW - (border * 2 + 12)));
+
+    // List/title start to the right of the meta box
+    const listX = Math.round(metaX + metaW + 14);
+    const listY = Math.round(panelY + border + pad);
+
+    this.title.setPosition(listX, listY);
+    this.list.setPosition(listX, Math.round(listY + 22));
+    this.hint.setPosition(panelX + border + pad, Math.round(panelY + panelH - border - pad - 14));
+
+    const listRight = Math.round(panelX + panelW - border - pad);
+    const fontSize = Number.parseInt(this.list.style.fontSize, 10) || 14;
+    const lineSpacing = Number.isFinite(this.list.lineSpacing) ? this.list.lineSpacing : 0;
+    const lineHeight = Math.max(12, fontSize + lineSpacing);
+    this._listAnchor = {
+      x: listX,
+      y: Math.round(listY + 22),
+      rowW: Math.max(10, listRight - listX),
+      rowH: lineHeight,
+    };
+
+    // Store for render() so it can format meta text without re-measuring
+    this._metaBox = { metaW, metaH };
 
     this._confirmAnchor = { panelX, panelY, panelW, panelH, border, pad };
     this.render();
@@ -261,6 +350,58 @@ class ComputerShop {
     } catch {}
   }
 
+  ensureRowHits() {
+    const size = this.data?.pageSize || 6;
+    while (this.rowHits.length < size) {
+      const rowIndex = this.rowHits.length;
+      const hit = this.scene.add.rectangle(0, 0, 10, 10, 0x000000, 0);
+      hit.setOrigin(0, 0);
+      hit.setAlpha(0);
+      hit.setInteractive();
+      hit.on("pointerover", () => this.handleRowHover(rowIndex));
+      hit.on("pointermove", () => this.handleRowHover(rowIndex));
+      this.container.add(hit);
+      this.rowHits.push(hit);
+    }
+    while (this.rowHits.length > size) {
+      const hit = this.rowHits.pop();
+      if (hit) hit.destroy();
+    }
+  }
+
+  updateRowHits(visibleCount) {
+    this.ensureRowHits();
+    const anchor = this._listAnchor;
+    if (!anchor) return;
+    const canSelect = this.isOpen && this.mode === "list";
+
+    for (let i = 0; i < this.rowHits.length; i++) {
+      const hit = this.rowHits[i];
+      const active = canSelect && i < visibleCount;
+      hit.setVisible(active);
+      if (hit.input) hit.input.enabled = active;
+      if (!active) continue;
+      const rowY = Math.round(anchor.y + i * anchor.rowH);
+      hit.setPosition(anchor.x, rowY);
+      hit.setSize(anchor.rowW, anchor.rowH);
+      if (hit.input?.hitArea) {
+        hit.input.hitArea.width = anchor.rowW;
+        hit.input.hitArea.height = anchor.rowH;
+      }
+    }
+  }
+
+  handleRowHover(rowIndex) {
+    if (!this.isOpen || this.mode !== "list") return;
+    const page = this.pageItems();
+    if (!page.length) return;
+    const next = Math.max(0, Math.min(page.length - 1, rowIndex));
+    if (next === this.index) return;
+    this.index = next;
+    this.render();
+    this.autoplaySelection();
+  }
+
   render() {
     const pageItems = this.pageItems();
     const total = this.data?.items?.length || 0;
@@ -277,6 +418,15 @@ class ComputerShop {
     if (!pageItems.length) lines.push("  (No items)");
 
     this.list.setText(lines.join("\n"));
+    this.updateRowHits(pageItems.length);
+
+    // Update top-left metadata box (SONGNAME / BPM / KEY / TAGS)
+    const sel = this.selectedItem();
+    const song = sel?.songName || sel?.name || "—";
+    const bpm = Number.isFinite(sel?.bpm) ? String(sel.bpm) : sel?.bpm ? String(sel.bpm) : "—";
+    const key = sel?.key ? String(sel.key) : "—";
+    const tags = Array.isArray(sel?.tags) ? sel.tags.join(", ") : sel?.tags ? String(sel.tags) : "—";
+    this.metaText.setText(`SONG: ${song}\nBPM: ${bpm}\nKEY: ${key}\nTAGS: ${tags}`);
 
     const audioHint = this.audioUnlocked ? "" : "  (Press A to enable sound)";
     if (this.mode === "list") {
@@ -408,8 +558,8 @@ class ComputerShop {
 
     // Any input counts as a "gesture" attempt for audio unlock.
     if (left || right || up || down || aJust) {
-      // Note: key presses are user gestures; pointer handlers call unlockAudio() directly.
-      if (!this.audioUnlocked && aJust) this.unlockAudio();
+      // Note: key presses are user gestures; pointer handlers call unlockAudioFromGesture() directly.
+      if (!this.audioUnlocked && aJust) this.unlockAudioFromGesture();
     }
 
     if (this.mode === "list") {
@@ -893,7 +1043,7 @@ class RoomScene extends Phaser.Scene {
 
       // If the shop is open, A should operate the shop (and unlock audio) and never arm run.
       if (this.shop?.isOpen) {
-        this.shop.unlockAudio();
+        this.shop.unlockAudioFromGesture();
         this.shop.layout(this.gameCam);
         this.shop.tick(now, { left: false, right: false, up: false, down: false, aJust: true, backJust: false });
         return;
@@ -1225,6 +1375,7 @@ class RoomScene extends Phaser.Scene {
 
     // PC opens the shop overlay
     if (candidate.id === "pc" && this.shop) {
+      this.shop.unlockAudioFromGesture();
       this.shop.open();
       this.shop.layout(this.gameCam);
       return;
@@ -1321,8 +1472,14 @@ class RoomScene extends Phaser.Scene {
       this.shop.layout(this.gameCam);
       this.shop.tick(now, { left, right, up, down, aJust, backJust });
 
-      // Prevent world movement while holding D-pad in shop
-      this.touch.left = this.touch.right = this.touch.up = this.touch.down = false;
+      // Important: DO NOT clear `this.touch.*` while the shop is open.
+      // On mobile, holding the D-pad often doesn't emit pointermove events every frame,
+      // so if we clear the flags here the menu will stop responding unless the user wiggles/spams.
+      // We only clear touch directions AFTER the shop closes to prevent movement bleed.
+      if (!this.shop.isOpen) {
+        this.touch.left = this.touch.right = this.touch.up = this.touch.down = false;
+        this.dpadPointerId = null;
+      }
 
       // Keep depth stable
       const playerBaseY = this.player.body ? this.player.body.bottom : this.player.y;

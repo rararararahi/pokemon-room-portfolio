@@ -1,0 +1,34 @@
+{
+  "pageSize": 6,
+  "items": [
+    { "id": "beat01", "name": "BEAT 01", "songName": "IN THE CLUB", "bpm": 128, "key": "", "tags": [], "price": 100, "preview": "/previews/in_the_club_128bpm.mp3", "buyUrl": "" },
+    { "id": "beat02", "name": "BEAT 02", "songName": "BEAT 02", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat02.mp3", "buyUrl": "" },
+    { "id": "beat03", "name": "BEAT 03", "songName": "BEAT 03", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat03.mp3", "buyUrl": "" },
+    { "id": "beat04", "name": "BEAT 04", "songName": "BEAT 04", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat04.mp3", "buyUrl": "" },
+    { "id": "beat05", "name": "BEAT 05", "songName": "BEAT 05", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat05.mp3", "buyUrl": "" },
+    { "id": "beat06", "name": "BEAT 06", "songName": "BEAT 06", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat06.mp3", "buyUrl": "" },
+
+    { "id": "beat07", "name": "BEAT 07", "songName": "BEAT 07", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat07.mp3", "buyUrl": "" },
+    { "id": "beat08", "name": "BEAT 08", "songName": "BEAT 08", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat08.mp3", "buyUrl": "" },
+    { "id": "beat09", "name": "BEAT 09", "songName": "BEAT 09", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat09.mp3", "buyUrl": "" },
+    { "id": "beat10", "name": "BEAT 10", "songName": "BEAT 10", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat10.mp3", "buyUrl": "" },
+    { "id": "beat11", "name": "BEAT 11", "songName": "BEAT 11", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat11.mp3", "buyUrl": "" },
+    { "id": "beat12", "name": "BEAT 12", "songName": "BEAT 12", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat12.mp3", "buyUrl": "" },
+
+    { "id": "beat13", "name": "BEAT 13", "songName": "BEAT 13", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat13.mp3", "buyUrl": "" },
+    { "id": "beat14", "name": "BEAT 14", "songName": "BEAT 14", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat14.mp3", "buyUrl": "" },
+    { "id": "beat15", "name": "BEAT 15", "songName": "BEAT 15", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat15.mp3", "buyUrl": "" },
+    { "id": "beat16", "name": "BEAT 16", "songName": "BEAT 16", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat16.mp3", "buyUrl": "" },
+    { "id": "beat17", "name": "BEAT 17", "songName": "BEAT 17", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat17.mp3", "buyUrl": "" },
+    { "id": "beat18", "name": "BEAT 18", "songName": "BEAT 18", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat18.mp3", "buyUrl": "" },
+
+    { "id": "beat19", "name": "BEAT 19", "songName": "BEAT 19", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat19.mp3", "buyUrl": "" },
+    { "id": "beat20", "name": "BEAT 20", "songName": "BEAT 20", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat20.mp3", "buyUrl": "" },
+    { "id": "beat21", "name": "BEAT 21", "songName": "BEAT 21", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat21.mp3", "buyUrl": "" },
+    { "id": "beat22", "name": "BEAT 22", "songName": "BEAT 22", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat22.mp3", "buyUrl": "" },
+    { "id": "beat23", "name": "BEAT 23", "songName": "BEAT 23", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat23.mp3", "buyUrl": "" },
+    { "id": "beat24", "name": "BEAT 24", "songName": "BEAT 24", "bpm": null, "key": "", "tags": [], "price": 100, "preview": "/previews/beat24.mp3", "buyUrl": "" },
+
+    { "id": "coffee", "name": "BUY ME A COFFEE", "songName": "THANK YOU", "bpm": null, "key": "", "tags": ["support"], "price": 5, "preview": "", "buyUrl": "" }
+  ]
+}
