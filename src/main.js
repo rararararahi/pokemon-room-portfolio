@@ -11,7 +11,440 @@ const FEET_W = 10;
 const FEET_H = 8;
 const FEET_OFFSET_X = 3;
 const FEET_OFFSET_Y = 8;
+
 const DEBUG_UI = false;
+
+// --- Computer Shop (Pokémon-style overlay w/ iOS-safe preview autoplay) ---
+class ComputerShop {
+  constructor(scene) {
+    this.scene = scene;
+
+    this.isOpen = false;
+    this.data = { pageSize: 6, items: [] };
+
+    this.page = 0;
+    this.index = 0;
+
+    this.mode = "list"; // "list" | "confirm"
+    this.confirmChoice = 0; // 0 YES, 1 NO
+    this.lastMoveAt = 0;
+    this.repeatMs = 120;
+
+    // Preview audio. iOS requires a user gesture before play() will succeed.
+    this.audioUnlocked = false;
+    this.audio = new Audio();
+    this.audio.preload = "none";
+    this.audio.loop = true;
+    this.audio.volume = 0.9;
+
+    // UI container (lives in uiLayer)
+    this.container = scene.add.container(0, 0);
+    this.container.setVisible(false);
+    this.container.setActive(false);
+
+    // Fullscreen dimmer
+    this.dim = scene.add.rectangle(0, 0, 10, 10, 0x000000, 0.85).setOrigin(0, 0);
+    this.dim.setInteractive();
+    this.dim.disableInteractive();
+    this.dim.on("pointerdown", () => {
+      if (!this.isOpen) return;
+      if (this.mode === "confirm") {
+        this.mode = "list";
+        this.render();
+      } else {
+        this.close();
+      }
+    });
+
+    // Main panel
+    this.panelBorder = scene.add.rectangle(0, 0, 10, 10, 0x111111).setOrigin(0, 0);
+    this.panelFill = scene.add.rectangle(0, 0, 10, 10, 0xffffff).setOrigin(0, 0);
+
+    this.title = scene.add.text(0, 0, "POKEPUTER", {
+      fontFamily: "monospace",
+      fontSize: "14px",
+      color: "#111111",
+    });
+
+    this.list = scene.add.text(0, 0, "", {
+      fontFamily: "monospace",
+      fontSize: "14px",
+      color: "#111111",
+      lineSpacing: 4,
+    });
+
+    this.hint = scene.add.text(0, 0, "", {
+      fontFamily: "monospace",
+      fontSize: "12px",
+      color: "#111111",
+    });
+
+    // Confirm box
+    this.confirmBorder = scene.add.rectangle(0, 0, 10, 10, 0x111111).setOrigin(0, 0);
+    this.confirmFill = scene.add.rectangle(0, 0, 10, 10, 0xffffff).setOrigin(0, 0);
+    this.confirmText = scene.add.text(0, 0, "", {
+      fontFamily: "monospace",
+      fontSize: "14px",
+      color: "#111111",
+      lineSpacing: 4,
+    });
+
+    this.container.add([
+      this.dim,
+      this.panelBorder,
+      this.panelFill,
+      this.title,
+      this.list,
+      this.hint,
+      this.confirmBorder,
+      this.confirmFill,
+      this.confirmText,
+    ]);
+
+    this.hideConfirm();
+
+    // Fire-and-forget load
+    this.load();
+  }
+
+  async load() {
+    try {
+      const res = await fetch("/data/shop.json", { cache: "no-store" });
+      if (!res.ok) throw new Error(`shop.json HTTP ${res.status}`);
+      const json = await res.json();
+      if (json && Array.isArray(json.items)) {
+        this.data = json;
+        if (!this.data.pageSize) this.data.pageSize = 6;
+      } else {
+        this.data = { pageSize: 6, items: [] };
+      }
+      this.page = 0;
+      this.index = 0;
+      this.render();
+    } catch (e) {
+      // Fallback demo data so the UI is testable even before shop.json exists.
+      console.warn("ComputerShop: failed to load /data/shop.json, using fallback", e);
+      this.data = {
+        pageSize: 6,
+        items: [
+          { id: "beat1", name: "BEAT 01", price: 100, preview: "/previews/beat01.mp3", buyUrl: "" },
+          { id: "beat2", name: "BEAT 02", price: 100, preview: "/previews/beat02.mp3", buyUrl: "" },
+          { id: "beat3", name: "BEAT 03", price: 100, preview: "/previews/beat03.mp3", buyUrl: "" },
+          { id: "beat4", name: "BEAT 04", price: 100, preview: "/previews/beat04.mp3", buyUrl: "" },
+          { id: "beat5", name: "BEAT 05", price: 100, preview: "/previews/beat05.mp3", buyUrl: "" },
+          { id: "coffee", name: "BUY ME A COFFEE", price: 5, preview: "/previews/coffee.mp3", buyUrl: "" },
+        ],
+      };
+      this.page = 0;
+      this.index = 0;
+      this.render();
+    }
+  }
+
+  open() {
+    if (this.isOpen) return;
+    this.isOpen = true;
+    this.mode = "list";
+    this.confirmChoice = 0;
+    this.container.setVisible(true);
+    this.container.setActive(true);
+    this.dim.setInteractive();
+    this.container.setDepth(9999);
+    this.render();
+
+    // Only autoplay immediately if we already unlocked audio earlier.
+    if (this.audioUnlocked) this.autoplaySelection();
+  }
+
+  close() {
+    if (!this.isOpen) return;
+    this.isOpen = false;
+    this.mode = "list";
+    this.confirmChoice = 0;
+    this.container.setVisible(false);
+    this.container.setActive(false);
+    this.dim.disableInteractive();
+    this.stopPreview();
+    this.hideConfirm();
+  }
+
+  // Call this from an actual user gesture (pointer/key) to satisfy iOS.
+  unlockAudio() {
+    if (this.audioUnlocked) return;
+    this.audioUnlocked = true;
+    // Attempt to start current selection immediately.
+    this.autoplaySelection();
+  }
+
+  layout(gameCam) {
+    const scene = this.scene;
+
+    // Phaser camera `viewport` can be undefined early (before setViewport runs).
+    // Fall back to the full canvas so we never crash during create().
+    const vp = (gameCam && gameCam.viewport) ? gameCam.viewport : {
+      x: 0,
+      y: 0,
+      width: scene.scale.width,
+      height: scene.scale.height,
+    };
+
+    const vpX = vp.x ?? 0;
+    const vpY = vp.y ?? 0;
+    const vpW = vp.width ?? scene.scale.width;
+    const vpH = vp.height ?? scene.scale.height;
+
+    this.dim.setPosition(0, 0);
+    this.dim.setSize(scene.scale.width, scene.scale.height);
+
+    const border = 4;
+    const pad = 8;
+
+    const panelW = Math.round(vpW * 0.94);
+    const panelH = Math.round(vpH * 0.78);
+    const panelX = Math.round(vpX + (vpW - panelW) / 2);
+    const panelY = Math.round(vpY + (vpH - panelH) / 2 - 6);
+
+    this.panelBorder.setPosition(panelX, panelY);
+    this.panelBorder.setSize(panelW, panelH);
+
+    this.panelFill.setPosition(panelX + border, panelY + border);
+    this.panelFill.setSize(panelW - border * 2, panelH - border * 2);
+
+    this.title.setPosition(panelX + border + pad, panelY + border + pad);
+
+    this.list.setPosition(panelX + border + pad, panelY + border + pad + 22);
+    this.hint.setPosition(panelX + border + pad, panelY + panelH - border - pad - 14);
+
+    this._confirmAnchor = { panelX, panelY, panelW, panelH, border, pad };
+    this.render();
+  }
+
+  pageItems() {
+    const items = this.data?.items || [];
+    const size = this.data?.pageSize || 6;
+    const start = this.page * size;
+    return items.slice(start, start + size);
+  }
+
+  selectedItem() {
+    const page = this.pageItems();
+    if (!page.length) return null;
+    const idx = Math.max(0, Math.min(page.length - 1, this.index));
+    return page[idx] || null;
+  }
+
+  stopPreview() {
+    try {
+      this.audio.pause();
+      this.audio.currentTime = 0;
+      this.audio.src = "";
+    } catch {}
+  }
+
+  autoplaySelection() {
+    if (!this.audioUnlocked) return;
+
+    const item = this.selectedItem();
+    const preview = item?.preview;
+    if (!preview) {
+      this.stopPreview();
+      return;
+    }
+    if (this.audio.src && this.audio.src.includes(preview)) return;
+
+    try {
+      this.audio.pause();
+      this.audio.currentTime = 0;
+      this.audio.src = preview;
+      const p = this.audio.play();
+      if (p && typeof p.catch === "function") p.catch(() => {});
+    } catch {}
+  }
+
+  render() {
+    const pageItems = this.pageItems();
+    const total = this.data?.items?.length || 0;
+    const size = this.data?.pageSize || 6;
+    const pageCount = Math.max(1, Math.ceil(total / size));
+
+    const lines = [];
+    for (let i = 0; i < pageItems.length; i++) {
+      const it = pageItems[i];
+      const cursor = i === this.index ? "▶" : " ";
+      const price = typeof it.price === "number" ? `$${it.price}` : "";
+      lines.push(`${cursor} ${it.name}${price ? `  ${price}` : ""}`);
+    }
+    if (!pageItems.length) lines.push("  (No items)");
+
+    this.list.setText(lines.join("\n"));
+
+    const audioHint = this.audioUnlocked ? "" : "  (Press A to enable sound)";
+    if (this.mode === "list") {
+      this.hint.setText(`A: Select   B: Back   Page ${this.page + 1}/${pageCount}${audioHint}`);
+    } else {
+      this.hint.setText(audioHint);
+    }
+
+    if (this.mode === "confirm") this.showConfirm();
+    else this.hideConfirm();
+  }
+
+  showConfirm() {
+    const item = this.selectedItem();
+    if (!item || !this._confirmAnchor) return;
+
+    const { panelX, panelY, panelW, panelH, border, pad } = this._confirmAnchor;
+    const cW = Math.round(panelW * 0.78);
+    const cH = 86;
+    const cX = Math.round(panelX + panelW - cW - 10);
+    const cY = Math.round(panelY + panelH - cH - 10);
+
+    this.confirmBorder.setVisible(true);
+    this.confirmFill.setVisible(true);
+    this.confirmText.setVisible(true);
+
+    this.confirmBorder.setPosition(cX, cY);
+    this.confirmBorder.setSize(cW, cH);
+
+    this.confirmFill.setPosition(cX + border, cY + border);
+    this.confirmFill.setSize(cW - border * 2, cH - border * 2);
+
+    const yesCursor = this.confirmChoice === 0 ? "▶" : " ";
+    const noCursor = this.confirmChoice === 1 ? "▶" : " ";
+
+    const name = item.name || "this";
+    const price = typeof item.price === "number" ? `$${item.price}` : "";
+
+    this.confirmText.setPosition(cX + border + pad, cY + border + pad);
+    this.confirmText.setText(`Buy ${name} for ${price}?\n\n${yesCursor} YES\n${noCursor} NO`);
+  }
+
+  hideConfirm() {
+    this.confirmBorder.setVisible(false);
+    this.confirmFill.setVisible(false);
+    this.confirmText.setVisible(false);
+  }
+
+  moveSelection(delta) {
+    const page = this.pageItems();
+    if (!page.length) return;
+    const next = Math.max(0, Math.min(page.length - 1, this.index + delta));
+    if (next === this.index) return;
+    this.index = next;
+    this.render();
+    this.autoplaySelection();
+  }
+
+  movePage(delta) {
+    const total = this.data?.items?.length || 0;
+    const size = this.data?.pageSize || 6;
+    const pageCount = Math.max(1, Math.ceil(total / size));
+    const next = Math.max(0, Math.min(pageCount - 1, this.page + delta));
+    if (next === this.page) return;
+    this.page = next;
+    this.index = 0;
+    this.render();
+    this.autoplaySelection();
+  }
+
+  confirmOpen() {
+    if (!this.selectedItem()) return;
+    this.mode = "confirm";
+    this.confirmChoice = 0;
+    this.render();
+  }
+
+  confirmMove(delta) {
+    const next = Math.max(0, Math.min(1, this.confirmChoice + delta));
+    if (next === this.confirmChoice) return;
+    this.confirmChoice = next;
+    this.render();
+  }
+
+  confirmAccept() {
+    const item = this.selectedItem();
+    if (!item) {
+      this.mode = "list";
+      this.render();
+      return;
+    }
+
+    // NO
+    if (this.confirmChoice === 1) {
+      this.mode = "list";
+      this.render();
+      return;
+    }
+
+    // YES
+    this.stopPreview();
+
+    const url = item.buyUrl;
+    if (url && typeof url === "string" && url.startsWith("http")) {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+
+    this.mode = "list";
+    this.render();
+  }
+
+  // Returns true if handled.
+  tick(now, input) {
+    if (!this.isOpen) return false;
+
+    const { left, right, up, down, aJust, backJust } = input;
+    const canMove = now - this.lastMoveAt >= this.repeatMs;
+
+    // Back closes shop or returns from confirm
+    if (backJust) {
+      if (this.mode === "confirm") {
+        this.mode = "list";
+        this.render();
+      } else {
+        this.close();
+      }
+      return true;
+    }
+
+    // Any input counts as a "gesture" attempt for audio unlock.
+    if (left || right || up || down || aJust) {
+      // Note: key presses are user gestures; pointer handlers call unlockAudio() directly.
+      if (!this.audioUnlocked && aJust) this.unlockAudio();
+    }
+
+    if (this.mode === "list") {
+      if (canMove && up) {
+        this.lastMoveAt = now;
+        this.moveSelection(-1);
+      } else if (canMove && down) {
+        this.lastMoveAt = now;
+        this.moveSelection(1);
+      } else if (canMove && left) {
+        this.lastMoveAt = now;
+        this.movePage(-1);
+      } else if (canMove && right) {
+        this.lastMoveAt = now;
+        this.movePage(1);
+      }
+
+      if (aJust) {
+        this.confirmOpen();
+      }
+    } else {
+      // confirm
+      if (canMove && (up || down)) {
+        this.lastMoveAt = now;
+        this.confirmMove(up ? -1 : 1);
+      }
+      if (aJust) {
+        this.confirmAccept();
+      }
+    }
+
+    return true;
+  }
+}
+// --- end ComputerShop ---
 
 class RoomScene extends Phaser.Scene {
   constructor() {
@@ -83,6 +516,8 @@ class RoomScene extends Phaser.Scene {
     this.keyA = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.A);
     this.keySpace = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
     this.keyShift = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SHIFT);
+    this.keyB = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.B);
+    this.keyEsc = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.ESC);
     // Enable multi-touch (needed to hold D-pad with one finger while pressing A with another).
     // Default is often 1 touch pointer; we want a few.
     this.input.addPointer(3);
@@ -290,6 +725,14 @@ class RoomScene extends Phaser.Scene {
 
     this.createControls();
 
+    // Ensure camera viewport + UI positions are set before any overlays read `gameCam.viewport`.
+    this.layout();
+
+    // Computer shop overlay (Pokémon-style)
+    this.shop = new ComputerShop(this);
+    this.uiLayer.add(this.shop.container);
+    this.shop.layout(this.gameCam);
+
     this.dialogOpen = false;
     this.dialogTyping = false;
     this.fullDialogText = "";
@@ -386,14 +829,16 @@ class RoomScene extends Phaser.Scene {
 
     const handleDpadPointer = (pointer) => {
       if (this.dialogOpen) return;
-      const bounds = this.dpadHit.getBounds();
-      const cx = bounds.centerX;
-      const cy = bounds.centerY;
-      const dx = pointer.worldX - cx;
-      const dy = pointer.worldY - cy;
+
+      // Use UI camera coordinates so the D-pad works regardless of game camera viewport.
+      const camPoint = pointer.positionToCamera(this.uiCam);
+      const cx = this.dpadHit.x;
+      const cy = this.dpadHit.y;
+      const dx = camPoint.x - cx;
+      const dy = camPoint.y - cy;
       const dist = Math.sqrt(dx * dx + dy * dy);
 
-      if (dist < deadzone) {
+      if (!Number.isFinite(dist) || dist < deadzone) {
         this.touch.left = this.touch.right = this.touch.up = this.touch.down = false;
         return;
       }
@@ -410,12 +855,16 @@ class RoomScene extends Phaser.Scene {
       this.touch.down = dir === "down";
 
       this.lastPressedTime[dir] = this.inputTick;
-      this.setFacing(dir);
+      // When shop is open, don't change facing; cursor movement is handled in update() via touch states.
+      if (!this.shop?.isOpen) {
+        this.setFacing(dir);
+      }
     };
 
     this.dpadHit.on("pointerdown", (ptr) => {
       if (this.dialogOpen) return;
-      if (this.dpadPointerId != null) return;
+      // Always re-claim on tap (helps iOS double-tap edge cases)
+      this.dpadPointerId = null;
       this.dpadPointerId = ptr.id;
       handleDpadPointer(ptr);
     });
@@ -441,6 +890,14 @@ class RoomScene extends Phaser.Scene {
       p.event?.stopPropagation?.();
 
       const now = this.time.now;
+
+      // If the shop is open, A should operate the shop (and unlock audio) and never arm run.
+      if (this.shop?.isOpen) {
+        this.shop.unlockAudio();
+        this.shop.layout(this.gameCam);
+        this.shop.tick(now, { left: false, right: false, up: false, down: false, aJust: true, backJust: false });
+        return;
+      }
 
       // If dialog is open, A always advances/closes immediately (no running).
       if (this.dialogOpen) {
@@ -491,6 +948,9 @@ class RoomScene extends Phaser.Scene {
     this.aHit.on("pointerup", endAHold);
     this.aHit.on("pointerupoutside", endAHold);
     this.aHit.on("pointerout", endAHold);
+
+    // Always position the UI immediately after creating controls.
+    this.layout();
   }
 
   layout() {
@@ -505,7 +965,8 @@ class RoomScene extends Phaser.Scene {
     const deckHeight = Math.min(preferredDeck, maxDeck);
     const deckTop = canvasH - deckHeight;
 
-    const vpX = Math.floor((canvasW - vpW) / 2);
+    // Clamp viewport so small screens never produce a negative viewport X (which shifts everything left).
+    const vpX = Math.max(0, Math.floor((canvasW - vpW) / 2));
     const vpY = Math.max(0, Math.floor((deckTop - vpH) / 2) - 50);
 
     this.gameCam.setViewport(vpX, vpY, vpW, vpH);
@@ -548,8 +1009,10 @@ class RoomScene extends Phaser.Scene {
 
     if (this.dpadVisual) this.dpadVisual.setPosition(dpadX, dpadY);
     if (this.aVisual) this.aVisual.setPosition(aX, aY);
-    this.dpadHit.setPosition(dpadX, dpadY);
-    this.aHit.setPosition(aX, aY);
+    if (this.dpadHit) this.dpadHit.setPosition(dpadX, dpadY);
+    if (this.aHit) this.aHit.setPosition(aX, aY);
+
+    if (this.shop) this.shop.layout(this.gameCam);
   }
 
   updateInteractCandidate(now) {
@@ -760,6 +1223,13 @@ class RoomScene extends Phaser.Scene {
       return;
     }
 
+    // PC opens the shop overlay
+    if (candidate.id === "pc" && this.shop) {
+      this.shop.open();
+      this.shop.layout(this.gameCam);
+      return;
+    }
+
     this.openDialog(candidate);
   }
 
@@ -785,7 +1255,9 @@ class RoomScene extends Phaser.Scene {
         ? "walk_left"
         : "walk_right";
 
-    if (this.player.anims.currentAnim?.key !== key) {
+    const curKey = this.player.anims.currentAnim?.key;
+    const isPlaying = !!this.player.anims.isPlaying;
+    if (curKey !== key || !isPlaying) {
       this.player.anims.play(key, true);
     }
   }
@@ -815,9 +1287,51 @@ class RoomScene extends Phaser.Scene {
   }
 
   update() {
+    if (!this.__t) this.__t = 0;
+    this.__t += 1;
+    if (this.__t % 120 === 0) console.log("update tick", this.__t);
+
     this.inputTick += 1;
 
     const now = this.time.now;
+
+    // --- Shop overlay takes over input ---
+    if (this.shop && this.shop.isOpen) {
+      const left = this.cursors.left.isDown || this.touch.left;
+      const right = this.cursors.right.isDown || this.touch.right;
+      const up = this.cursors.up.isDown || this.touch.up;
+      const down = this.cursors.down.isDown || this.touch.down;
+
+      const aJust =
+        Phaser.Input.Keyboard.JustDown(this.keyA) ||
+        Phaser.Input.Keyboard.JustDown(this.keySpace);
+
+      const backJust =
+        (this.keyEsc && Phaser.Input.Keyboard.JustDown(this.keyEsc)) ||
+        (this.keyB && Phaser.Input.Keyboard.JustDown(this.keyB));
+
+      // Freeze player
+      this.touch.interact = false;
+      this.runHeld = false;
+      const body = this.player.body;
+      body.setVelocity(0);
+      this.stopWalk();
+
+      // Keep shop layout in sync with viewport
+      this.shop.layout(this.gameCam);
+      this.shop.tick(now, { left, right, up, down, aJust, backJust });
+
+      // Prevent world movement while holding D-pad in shop
+      this.touch.left = this.touch.right = this.touch.up = this.touch.down = false;
+
+      // Keep depth stable
+      const playerBaseY = this.player.body ? this.player.body.bottom : this.player.y;
+      this.player.setDepth(playerBaseY);
+      if (this.worldLayer?.sort) this.worldLayer.sort("depth");
+
+      return;
+    }
+
     const keyJustPressed =
       Phaser.Input.Keyboard.JustDown(this.keyA) ||
       Phaser.Input.Keyboard.JustDown(this.keySpace);
