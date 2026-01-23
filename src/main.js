@@ -93,6 +93,9 @@ class ComputerShop {
       color: "#111111",
     });
 
+    this.selectBg = scene.add.rectangle(0, 0, 10, 10, 0xdddddd, 0.35).setOrigin(0, 0);
+    this.selectBg.setVisible(false);
+
     // Confirm box
     this.confirmBorder = scene.add.rectangle(0, 0, 10, 10, 0x111111).setOrigin(0, 0);
     this.confirmFill = scene.add.rectangle(0, 0, 10, 10, 0xffffff).setOrigin(0, 0);
@@ -111,6 +114,7 @@ class ComputerShop {
       this.metaFill,
       this.metaText,
       this.title,
+      this.selectBg,
       this.list,
       this.hint,
       this.confirmBorder,
@@ -169,8 +173,7 @@ class ComputerShop {
     this.container.setDepth(9999);
     this.render();
 
-    // Only autoplay immediately if we already unlocked audio earlier.
-    if (this.audioUnlocked) this.autoplaySelection();
+    this.autoplaySelection();
   }
 
   close() {
@@ -190,34 +193,31 @@ class ComputerShop {
   unlockAudioFromGesture() {
     if (this.audioUnlocked) return;
     const audio = this.audio;
-    const onSuccess = () => {
-      audio.pause();
-      audio.currentTime = 0;
-      audio.muted = false;
-      audio.loop = true;
-      this.audioUnlocked = true;
-      if (this.isOpen) this.autoplaySelection();
-    };
-    const onFailure = () => {
-      audio.muted = false;
-      audio.loop = true;
-      this.audioUnlocked = false;
-    };
+    const unlockSrc = this.selectedItem()?.preview || this.audioUnlockSrc;
+    if (!unlockSrc) return;
+
+    audio.src = unlockSrc;
+    audio.muted = true;
+    audio.loop = false;
 
     try {
-      const unlockSrc = this.selectedItem()?.preview || this.audioUnlockSrc;
-      if (!unlockSrc) return;
-      audio.src = unlockSrc;
-      audio.muted = true;
-      audio.loop = false;
-      const p = audio.play();
-      if (p && typeof p.then === "function") {
-        p.then(onSuccess).catch(onFailure);
-      } else {
-        onSuccess();
+      const playPromise = audio.play();
+      if (playPromise && typeof playPromise.then === "function") {
+        playPromise
+          .then(() => {
+            audio.pause();
+            audio.currentTime = 0;
+            audio.muted = false;
+            audio.loop = true;
+            this.audioUnlocked = true;
+            if (this.isOpen) this.autoplaySelection();
+          })
+          .catch(() => {
+            this.audioUnlocked = false;
+          });
       }
     } catch {
-      onFailure();
+      this.audioUnlocked = false;
     }
   }
 
@@ -269,7 +269,7 @@ class ComputerShop {
 
     // Meta box dims (top-left, like the mart money box)
     const metaW = Math.min(150, Math.floor(panelW * 0.46));
-    const metaH = 64;
+    const metaH = 84; // 64 + 20px taller
     const metaX = Math.round(panelX + border + pad);
     const metaY = Math.round(panelY + border + pad);
 
@@ -360,6 +360,7 @@ class ComputerShop {
       hit.setInteractive();
       hit.on("pointerover", () => this.handleRowHover(rowIndex));
       hit.on("pointermove", () => this.handleRowHover(rowIndex));
+      hit.on("pointerdown", () => this.handleRowTap(rowIndex));
       this.container.add(hit);
       this.rowHits.push(hit);
     }
@@ -402,6 +403,18 @@ class ComputerShop {
     this.autoplaySelection();
   }
 
+  handleRowTap(rowIndex) {
+    if (!this.isOpen || this.mode !== "list") return;
+    if (!this.audioUnlocked) this.unlockAudioFromGesture();
+    const page = this.pageItems();
+    if (!page.length) return;
+    const next = Math.max(0, Math.min(page.length - 1, rowIndex));
+    if (next === this.index) return;
+    this.index = next;
+    this.render();
+    this.autoplaySelection();
+  }
+
   render() {
     const pageItems = this.pageItems();
     const total = this.data?.items?.length || 0;
@@ -413,12 +426,13 @@ class ComputerShop {
       const it = pageItems[i];
       const cursor = i === this.index ? "▶" : " ";
       const price = typeof it.price === "number" ? `$${it.price}` : "";
-      lines.push(`${cursor} ${it.name}${price ? `  ${price}` : ""}`);
+      lines.push(`${cursor} ${it.name}${price ? ` ${price}` : ""}`);
     }
     if (!pageItems.length) lines.push("  (No items)");
 
     this.list.setText(lines.join("\n"));
     this.updateRowHits(pageItems.length);
+    this.updateSelectionHighlight(pageItems.length);
 
     // Update top-left metadata box (SONGNAME / BPM / KEY / TAGS)
     const sel = this.selectedItem();
@@ -428,15 +442,28 @@ class ComputerShop {
     const tags = Array.isArray(sel?.tags) ? sel.tags.join(", ") : sel?.tags ? String(sel.tags) : "—";
     this.metaText.setText(`SONG: ${song}\nBPM: ${bpm}\nKEY: ${key}\nTAGS: ${tags}`);
 
-    const audioHint = this.audioUnlocked ? "" : "  (Press A to enable sound)";
+    const audioHint = "";
     if (this.mode === "list") {
-      this.hint.setText(`A: Select   B: Back   Page ${this.page + 1}/${pageCount}${audioHint}`);
+      this.hint.setText(`A: Select   Tap Screen: Back   Page ${this.page + 1}/${pageCount}${audioHint}`);
     } else {
       this.hint.setText(audioHint);
     }
 
     if (this.mode === "confirm") this.showConfirm();
     else this.hideConfirm();
+  }
+
+  updateSelectionHighlight(visibleCount) {
+    if (!this.selectBg) return;
+    const anchor = this._listAnchor;
+    const canShow = this.isOpen && this.mode === "list" && visibleCount > 0 && anchor;
+    this.selectBg.setVisible(!!canShow);
+    if (!canShow) return;
+
+    const rowIndex = Math.max(0, Math.min(visibleCount - 1, this.index));
+    const rowY = Math.round(anchor.y + rowIndex * anchor.rowH);
+    this.selectBg.setPosition(anchor.x, rowY);
+    this.selectBg.setSize(anchor.rowW, anchor.rowH);
   }
 
   showConfirm() {
@@ -596,6 +623,290 @@ class ComputerShop {
 }
 // --- end ComputerShop ---
 
+class TVOverlay {
+  constructor(scene) {
+    this.scene = scene;
+    this.isOpen = false;
+    this.apiReady = false;
+    this.playerReady = false;
+    this.soundUnlocked = false;
+    this.pendingUnmute = false;
+    this.videoId = "";
+    this.player = null;
+
+    this.container = scene.add.container(0, 0);
+    this.container.setVisible(false);
+    this.container.setActive(false);
+    this.container.setDepth(10000);
+    scene.uiLayer.add(this.container);
+
+    this.dim = scene.add.rectangle(0, 0, 10, 10, 0x000000, 0.85).setOrigin(0, 0);
+    this.dim.setInteractive();
+    this.dim.disableInteractive();
+    this.dim.on("pointerdown", () => {
+      if (this.isOpen) this.close();
+    });
+
+    this.rootEl = document.createElement("div");
+    this.rootEl.style.position = "relative";
+    this.rootEl.style.width = "100%";
+    this.rootEl.style.height = "100%";
+    this.rootEl.style.background = "#000000";
+    this.rootEl.style.overflow = "hidden";
+    this.rootEl.style.border = "4px solid #111111";
+    this.rootEl.style.boxSizing = "border-box";
+    this.rootEl.style.pointerEvents = "none";
+    this.rootEl.style.touchAction = "manipulation";
+
+    this.playerMount = document.createElement("div");
+    this.playerMount.style.position = "absolute";
+    this.playerMount.style.left = "0";
+    this.playerMount.style.top = "0";
+    this.playerMount.style.width = "100%";
+    this.playerMount.style.height = "100%";
+    this.playerMount.style.background = "#000000";
+
+    this.hintEl = document.createElement("div");
+    this.hintEl.textContent = "Press A for sound";
+    this.hintEl.style.position = "absolute";
+    this.hintEl.style.left = "8px";
+    this.hintEl.style.top = "8px";
+    this.hintEl.style.padding = "4px 6px";
+    this.hintEl.style.background = "rgba(0, 0, 0, 0.6)";
+    this.hintEl.style.color = "#ffffff";
+    this.hintEl.style.fontFamily = "monospace";
+    this.hintEl.style.fontSize = "11px";
+    this.hintEl.style.letterSpacing = "0.5px";
+    this.hintEl.style.pointerEvents = "none";
+    this.hintEl.style.display = "none";
+
+    this.rootEl.appendChild(this.playerMount);
+    this.rootEl.appendChild(this.hintEl);
+
+    this.dom = scene.add.dom(0, 0, this.rootEl);
+    this.dom.setOrigin(0, 0);
+    this.dom.setVisible(false);
+
+    this.container.add([this.dim, this.dom]);
+
+    TVOverlay.loadYouTubeApi()
+      .then(() => {
+        this.apiReady = true;
+        if (this.isOpen) this.ensurePlayer();
+      })
+      .catch(() => {});
+  }
+
+  static loadYouTubeApi() {
+    if (TVOverlay._apiPromise) return TVOverlay._apiPromise;
+    TVOverlay._apiPromise = new Promise((resolve) => {
+      if (window.YT && window.YT.Player) {
+        resolve(window.YT);
+        return;
+      }
+
+      const existing = document.getElementById("youtube-iframe-api");
+      if (existing) {
+        const waitForReady = () => {
+          if (window.YT && window.YT.Player) resolve(window.YT);
+          else setTimeout(waitForReady, 50);
+        };
+        waitForReady();
+        return;
+      }
+
+      const tag = document.createElement("script");
+      tag.id = "youtube-iframe-api";
+      tag.src = "https://www.youtube.com/iframe_api";
+      tag.async = true;
+
+      const firstScript = document.getElementsByTagName("script")[0];
+      if (firstScript?.parentNode) firstScript.parentNode.insertBefore(tag, firstScript);
+      else document.head.appendChild(tag);
+
+      const prevReady = window.onYouTubeIframeAPIReady;
+      window.onYouTubeIframeAPIReady = () => {
+        if (typeof prevReady === "function") prevReady();
+        resolve(window.YT);
+      };
+    });
+    return TVOverlay._apiPromise;
+  }
+
+  extractVideoId(url) {
+    if (!url) return "";
+    try {
+      const parsed = new URL(url);
+      if (parsed.hostname.includes("youtu.be")) return parsed.pathname.replace("/", "");
+      const v = parsed.searchParams.get("v");
+      if (v) return v;
+      if (parsed.pathname.startsWith("/embed/")) return parsed.pathname.replace("/embed/", "");
+    } catch {
+      const match = url.match(/[?&]v=([^&]+)/);
+      if (match) return match[1];
+      const short = url.match(/youtu\.be\/([^?]+)/);
+      if (short) return short[1];
+    }
+    return url;
+  }
+
+  showHint(visible) {
+    if (!this.hintEl) return;
+    this.hintEl.style.display = visible ? "block" : "none";
+  }
+
+  startMutedPlayback() {
+    if (!this.player) return;
+    try {
+      this.player.mute();
+      this.player.setVolume(0);
+      this.player.playVideo();
+    } catch {}
+  }
+
+  ensurePlayer() {
+    if (!this.apiReady || !this.videoId) return;
+
+    if (!this.player) {
+      this.player = new window.YT.Player(this.playerMount, {
+        width: "100%",
+        height: "100%",
+        videoId: this.videoId,
+        playerVars: {
+          autoplay: 1,
+          playsinline: 1,
+          mute: 1,
+          controls: 1,
+          rel: 0,
+          modestbranding: 1,
+        },
+        events: {
+          onReady: () => {
+            this.playerReady = true;
+            this.startMutedPlayback();
+            if (this.pendingUnmute) this.enableSoundFromGesture();
+          },
+        },
+      });
+    } else if (this.playerReady && this.player.loadVideoById) {
+      this.player.loadVideoById(this.videoId);
+      this.startMutedPlayback();
+    }
+  }
+
+  enableSoundFromGesture() {
+    if (this.soundUnlocked) return true;
+    if (!this.playerReady || !this.player) {
+      this.pendingUnmute = true;
+      this.showHint(true);
+      return false;
+    }
+
+    let success = false;
+    try {
+      this.player.unMute();
+      this.player.setVolume(100);
+      this.player.playVideo();
+      if (typeof this.player.isMuted === "function") {
+        success = !this.player.isMuted();
+      } else {
+        success = true;
+      }
+    } catch {}
+
+    this.soundUnlocked = success;
+    this.pendingUnmute = !success;
+    this.showHint(!success);
+    return success;
+  }
+
+  open(url) {
+    this.isOpen = true;
+    this.container.setVisible(true);
+    this.container.setActive(true);
+    this.dom.setVisible(true);
+    this.rootEl.style.pointerEvents = "auto";
+    this.dim.setInteractive();
+    this.container.setDepth(10000);
+    this.soundUnlocked = false;
+    this.pendingUnmute = false;
+    this.showHint(false);
+
+    this.videoId = this.extractVideoId(url);
+    this.ensurePlayer();
+  }
+
+  close() {
+    if (!this.isOpen) return;
+    this.isOpen = false;
+    this.container.setVisible(false);
+    this.container.setActive(false);
+    this.dom.setVisible(false);
+    this.rootEl.style.pointerEvents = "none";
+    this.dim.disableInteractive();
+    this.soundUnlocked = false;
+    this.pendingUnmute = false;
+    this.showHint(false);
+
+    if (this.playerMount) {
+      const iframe = this.playerMount.querySelector("iframe");
+      if (iframe) iframe.src = "about:blank";
+      this.playerMount.innerHTML = "";
+    }
+
+    if (this.player?.destroy) {
+      try {
+        this.player.destroy();
+      } catch {}
+    }
+    this.player = null;
+    this.playerReady = false;
+  }
+
+  layout(gameCam) {
+    const scene = this.scene;
+    let vpX = 0;
+    let vpY = 0;
+    let vpW = scene.scale.width;
+    let vpH = scene.scale.height;
+
+    if (
+      gameCam &&
+      Number.isFinite(gameCam.x) &&
+      Number.isFinite(gameCam.y) &&
+      Number.isFinite(gameCam.width) &&
+      Number.isFinite(gameCam.height) &&
+      gameCam.width > 0 &&
+      gameCam.height > 0
+    ) {
+      vpX = Math.round(gameCam.x);
+      vpY = Math.round(gameCam.y);
+      vpW = Math.round(gameCam.width);
+      vpH = Math.round(gameCam.height);
+    }
+
+    this.dim.setPosition(vpX, vpY);
+    this.dim.setSize(vpW, vpH);
+
+    const pad = 10;
+    const frameX = Math.round(vpX + pad);
+    const frameY = Math.round(vpY + pad);
+    const frameW = Math.max(80, Math.round(vpW - pad * 2));
+    const frameH = Math.max(80, Math.round(vpH - pad * 2));
+
+    this.dom.setPosition(frameX, frameY);
+
+    // Phaser DOMElement doesn't reliably expose setSize across builds; prefer setDisplaySize if present.
+    if (typeof this.dom.setDisplaySize === "function") {
+      this.dom.setDisplaySize(frameW, frameH);
+    }
+
+    // Always size via CSS so the embedded iframe/container matches the intended frame.
+    this.rootEl.style.width = `${frameW}px`;
+    this.rootEl.style.height = `${frameH}px`;
+  }
+}
+
 class RoomScene extends Phaser.Scene {
   constructor() {
     super("room");
@@ -625,6 +936,7 @@ class RoomScene extends Phaser.Scene {
     this.load.image("studer", "/assets/room/studer.png");
     this.load.image("studer_controller", "/assets/room/studer_controller.png");
     this.load.image("couch", "/assets/room/couch.png");
+    this.load.image("tv", "/assets/room/TV.png");
     this.load.image("ui_dpad", "/assets/ui/dpad.png");
     this.load.image("ui_a", "/assets/ui/abutton.png");
     this.load.image("floor", "/assets/room/floor.png");
@@ -824,7 +1136,51 @@ class RoomScene extends Phaser.Scene {
       const couchY = Math.round(GAME_H / 2 - couch.displayHeight / 2 + 86);
       couch.setPosition(couchX, couchY);
       this.worldLayer.add(couch);
-      makeBlocker(couch, 0.95, 16);
+      // Couch collision: asymmetric inset to match the visible sprite edges.
+      // - Right side: reduce inset so you can't clip in (was clipping ~3px)
+      // - Top: increase inset so you can approach closer (was blocked ~4px early)
+      const cb = couch.getBounds();
+      const insetL = 4;
+      const insetR = -1; // was 0
+      const insetT = 8; // was 4
+      const insetB = 4;
+      const couchBlocker = this.add.rectangle(
+        cb.x + insetL,
+        cb.y + insetT,
+        Math.max(1, cb.width - (insetL + insetR)),
+        Math.max(1, cb.height - (insetT + insetB)),
+        0x00ff00,
+        DEBUG_UI ? 0.25 : 0
+      );
+      couchBlocker.setOrigin(0, 0);
+      this.worldLayer.add(couchBlocker);
+      this.physics.add.existing(couchBlocker, true);
+      this.physics.add.collider(this.player, couchBlocker);
+      // Keep depth sorting consistent
+      const baseY = couchBlocker.getBottomCenter().y;
+      couch.setDepth(baseY);
+      couchBlocker.setDepth(baseY);
+      couch.blocker = couchBlocker;
+    }
+
+    // TV (for YouTube playback overlay)
+    const SHOW_TV = true;
+    let tv = null;
+    if (SHOW_TV) {
+      tv = this.add.image(0, 0, "tv").setOrigin(0, 0);
+      // Scale/position to taste; keep similar visual weight to other props.
+      tv.setScale(PROP_SCALE * 2.3 * 0.5);
+
+      // Place it just to the left of the computer (PC) on the top wall.
+      // `pc` is origin(1, 0), so its left edge is (pc.x - pc.displayWidth).
+      const gap = 8;
+      const tvX = Math.round(pc.x - pc.displayWidth - gap - tv.displayWidth - 15);
+      const tvY = Math.round(pc.y + 2);
+      tv.setPosition(tvX, tvY);
+      this.worldLayer.add(tv);
+
+      // Use a shallow bottom blocker so you can't walk through the stand/base.
+      makeBlocker(tv, 0.9, 12);
     }
 
     addInteractable({
@@ -832,6 +1188,19 @@ class RoomScene extends Phaser.Scene {
       sprite: pc,
       text: "Computer...",
     });
+    if (tv) {
+      addInteractable({
+        id: "tv",
+        sprite: tv,
+        text: "TV...",
+        // Allow interaction from any angle by using a proximity rectangle.
+        getInteractRect: () => {
+          const b = tv.getBounds();
+          const pad = 12;
+          return new Phaser.Geom.Rectangle(b.x - pad, b.y - pad, b.width + pad * 2, b.height + pad * 2);
+        },
+      });
+    }
     addInteractable({
       id: "console",
       sprite: ssl,
@@ -847,6 +1216,18 @@ class RoomScene extends Phaser.Scene {
         id: "couch",
         sprite: couch,
         text: "This couch has seen a lot of late nights...",
+        // Allow interaction from any angle by using a proximity rectangle
+        // instead of the facing/dot-product check.
+        getInteractRect: () => {
+          const b = couch.getBounds();
+          const pad = 12; // interaction distance around the couch
+          return new Phaser.Geom.Rectangle(
+            b.x - pad,
+            b.y - pad,
+            b.width + pad * 2,
+            b.height + pad * 2
+          );
+        },
       });
     }
     addInteractable({
@@ -882,6 +1263,12 @@ class RoomScene extends Phaser.Scene {
     this.shop = new ComputerShop(this);
     this.uiLayer.add(this.shop.container);
     this.shop.layout(this.gameCam);
+
+    this.tvOverlay = new TVOverlay(this);
+    this.tvOverlay.layout(this.gameCam);
+    this.tvVideos = [];
+    this.tvBag = [];
+    this.loadTvVideos();
 
     this.dialogOpen = false;
     this.dialogTyping = false;
@@ -1041,6 +1428,14 @@ class RoomScene extends Phaser.Scene {
 
       const now = this.time.now;
 
+      // If TV is open, A should unlock sound (if needed) or close.
+      if (this.tvOverlay?.isOpen) {
+        if (!this.tvOverlay.soundUnlocked) this.tvOverlay.enableSoundFromGesture();
+        else this.tvOverlay.close();
+        this.touch.interact = false;
+        return;
+      }
+
       // If the shop is open, A should operate the shop (and unlock audio) and never arm run.
       if (this.shop?.isOpen) {
         this.shop.unlockAudioFromGesture();
@@ -1163,6 +1558,7 @@ class RoomScene extends Phaser.Scene {
     if (this.aHit) this.aHit.setPosition(aX, aY);
 
     if (this.shop) this.shop.layout(this.gameCam);
+    if (this.tvOverlay) this.tvOverlay.layout(this.gameCam);
   }
 
   updateInteractCandidate(now) {
@@ -1244,6 +1640,37 @@ class RoomScene extends Phaser.Scene {
     }
 
     return effectiveCandidate;
+  }
+
+  async loadTvVideos() {
+    try {
+      const res = await fetch("/data/tv_videos.json", { cache: "no-store" });
+      if (!res.ok) throw new Error(`tv_videos.json HTTP ${res.status}`);
+      const json = await res.json();
+      if (json && Array.isArray(json.videos)) {
+        this.tvVideos = json.videos.filter(Boolean);
+        return;
+      }
+    } catch (e) {
+      console.warn("RoomScene: failed to load /data/tv_videos.json, using fallback", e);
+    }
+    this.tvVideos = ["https://www.youtube.com/watch?v=hrMlEv-6SEw"];
+  }
+
+  shuffleInPlace(arr) {
+    for (let i = arr.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+  }
+
+  getNextTvUrl() {
+    if (!this.tvVideos.length) return "https://www.youtube.com/watch?v=hrMlEv-6SEw";
+    if (!this.tvBag.length) {
+      this.tvBag = [...this.tvVideos];
+      this.shuffleInPlace(this.tvBag);
+    }
+    return this.tvBag.pop();
   }
 
   getWrappedDialogText(text) {
@@ -1361,6 +1788,13 @@ class RoomScene extends Phaser.Scene {
   }
 
   handleA(timeNow) {
+    if (this.tvOverlay?.isOpen) {
+      if (!this.tvOverlay.soundUnlocked) this.tvOverlay.enableSoundFromGesture();
+      else this.tvOverlay.close();
+      this.touch.interact = false;
+      return;
+    }
+
     if (this.dialogOpen) {
       if (this.dialogTyping) this.finishTyping();
       else this.closeDialog();
@@ -1378,6 +1812,14 @@ class RoomScene extends Phaser.Scene {
       this.shop.unlockAudioFromGesture();
       this.shop.open();
       this.shop.layout(this.gameCam);
+      return;
+    }
+
+    if (candidate.id === "tv" && this.tvOverlay) {
+      const url = this.getNextTvUrl();
+      this.tvOverlay.open(url);
+      this.tvOverlay.layout(this.gameCam);
+      this.tvOverlay.enableSoundFromGesture();
       return;
     }
 
@@ -1438,13 +1880,48 @@ class RoomScene extends Phaser.Scene {
   }
 
   update() {
+    // Debug heartbeat (kept lightweight)
     if (!this.__t) this.__t = 0;
     this.__t += 1;
-    if (this.__t % 120 === 0) console.log("update tick", this.__t);
+    if (this.__t % 240 === 0) console.log("update tick", this.__t);
 
     this.inputTick += 1;
-
     const now = this.time.now;
+
+    // --- TV overlay takes over input ---
+    if (this.tvOverlay && this.tvOverlay.isOpen) {
+      const aJust =
+        Phaser.Input.Keyboard.JustDown(this.keyA) ||
+        Phaser.Input.Keyboard.JustDown(this.keySpace);
+
+      const backJust =
+        (this.keyB && Phaser.Input.Keyboard.JustDown(this.keyB)) ||
+        (this.keyEsc && Phaser.Input.Keyboard.JustDown(this.keyEsc));
+
+      // Freeze player
+      this.touch.interact = false;
+      this.runHeld = false;
+      const body = this.player.body;
+      if (body) body.setVelocity(0);
+      this.stopWalk();
+
+      // Keep overlay sized to the GBA viewport
+      this.tvOverlay.layout(this.gameCam);
+
+      if (aJust) {
+        if (!this.tvOverlay.soundUnlocked) this.tvOverlay.enableSoundFromGesture();
+        else this.tvOverlay.close();
+        this.touch.interact = false;
+      }
+
+      if (backJust) this.tvOverlay.close();
+
+      // Keep depth stable
+      const playerBaseY = this.player.body ? this.player.body.bottom : this.player.y;
+      this.player.setDepth(playerBaseY);
+      if (this.worldLayer?.sort) this.worldLayer.sort("depth");
+      return;
+    }
 
     // --- Shop overlay takes over input ---
     if (this.shop && this.shop.isOpen) {
@@ -1461,21 +1938,18 @@ class RoomScene extends Phaser.Scene {
         (this.keyEsc && Phaser.Input.Keyboard.JustDown(this.keyEsc)) ||
         (this.keyB && Phaser.Input.Keyboard.JustDown(this.keyB));
 
-      // Freeze player
+      // Freeze player while shop open
       this.touch.interact = false;
       this.runHeld = false;
       const body = this.player.body;
-      body.setVelocity(0);
+      if (body) body.setVelocity(0);
       this.stopWalk();
 
-      // Keep shop layout in sync with viewport
+      // Keep overlay sized to the GBA viewport
       this.shop.layout(this.gameCam);
       this.shop.tick(now, { left, right, up, down, aJust, backJust });
 
-      // Important: DO NOT clear `this.touch.*` while the shop is open.
-      // On mobile, holding the D-pad often doesn't emit pointermove events every frame,
-      // so if we clear the flags here the menu will stop responding unless the user wiggles/spams.
-      // We only clear touch directions AFTER the shop closes to prevent movement bleed.
+      // If shop just closed, clear touch so we don't drift
       if (!this.shop.isOpen) {
         this.touch.left = this.touch.right = this.touch.up = this.touch.down = false;
         this.dpadPointerId = null;
@@ -1485,7 +1959,6 @@ class RoomScene extends Phaser.Scene {
       const playerBaseY = this.player.body ? this.player.body.bottom : this.player.y;
       this.player.setDepth(playerBaseY);
       if (this.worldLayer?.sort) this.worldLayer.sort("depth");
-
       return;
     }
 
@@ -1497,19 +1970,21 @@ class RoomScene extends Phaser.Scene {
       this.touch.interact = false;
       this.runHeld = false;
       const body = this.player.body;
-      body.setVelocity(0);
+      if (body) body.setVelocity(0);
       this.stopWalk();
       const playerBaseY = this.player.body ? this.player.body.bottom : this.player.y;
       this.player.setDepth(playerBaseY);
       if (this.worldLayer?.sort) this.worldLayer.sort("depth");
     };
 
+    // Dialog freezes movement
     if (this.dialogOpen) {
       if (keyJustPressed) this.handleA(now);
       freezePlayer();
       return;
     }
 
+    // If player tapped A slightly early, allow a small "coyote" window to still open dialog
     const effectiveCandidate = this.updateInteractCandidate(now);
     if (!this.dialogOpen && this.pendingInteractUntil > now && effectiveCandidate) {
       this.openDialog(effectiveCandidate);
@@ -1517,89 +1992,54 @@ class RoomScene extends Phaser.Scene {
       return;
     }
 
+    // Keyboard A / Space interaction
     if (keyJustPressed) {
       this.handleA(now);
-      if (this.dialogOpen) {
+      if (this.dialogOpen || (this.shop && this.shop.isOpen) || (this.tvOverlay && this.tvOverlay.isOpen)) {
         freezePlayer();
         return;
       }
     }
 
-    const leftPressed = this.cursors.left.isDown || this.touch.left;
-    const rightPressed = this.cursors.right.isDown || this.touch.right;
-    const upPressed = this.cursors.up.isDown || this.touch.up;
-    const downPressed = this.cursors.down.isDown || this.touch.down;
+    // --- Movement ---
+    const body = this.player.body;
+    if (!body) return;
 
-    if (Phaser.Input.Keyboard.JustDown(this.cursors.left)) this.lastPressedTime.left = this.inputTick;
-    if (Phaser.Input.Keyboard.JustDown(this.cursors.right)) this.lastPressedTime.right = this.inputTick;
-    if (Phaser.Input.Keyboard.JustDown(this.cursors.up)) this.lastPressedTime.up = this.inputTick;
-    if (Phaser.Input.Keyboard.JustDown(this.cursors.down)) this.lastPressedTime.down = this.inputTick;
+    const leftPressed = (this.cursors?.left?.isDown || false) || !!this.touch.left;
+    const rightPressed = (this.cursors?.right?.isDown || false) || !!this.touch.right;
+    const upPressed = (this.cursors?.up?.isDown || false) || !!this.touch.up;
+    const downPressed = (this.cursors?.down?.isDown || false) || !!this.touch.down;
 
-    let moveX = 0;
-    let moveY = 0;
+    // Mobile run latch (hold A) OR desktop Shift
+    const running = !!this.runHeld || (!!this.keyShift && this.keyShift.isDown);
+    const speed = SPEED * (running ? RUN_MULT : 1);
 
-    if (leftPressed && !rightPressed) moveX = -1;
-    else if (rightPressed && !leftPressed) moveX = 1;
+    let vx = 0;
+    let vy = 0;
+    if (leftPressed) vx -= 1;
+    if (rightPressed) vx += 1;
+    if (upPressed) vy -= 1;
+    if (downPressed) vy += 1;
 
-    if (upPressed && !downPressed) moveY = -1;
-    else if (downPressed && !upPressed) moveY = 1;
+    if (vx !== 0 || vy !== 0) {
+      const len = Math.hypot(vx, vy) || 1;
+      vx /= len;
+      vy /= len;
+      body.setVelocity(vx * speed, vy * speed);
 
-    const horizontalDir =
-      leftPressed && rightPressed
-        ? this.lastPressedTime.left >= this.lastPressedTime.right
-          ? "left"
-          : "right"
-        : leftPressed
-        ? "left"
-        : rightPressed
-        ? "right"
-        : null;
+      // Dominant-axis facing like GBA
+      let dir = this.facing;
+      if (Math.abs(vx) > Math.abs(vy)) dir = vx < 0 ? "left" : "right";
+      else dir = vy < 0 ? "up" : "down";
 
-    const verticalDir =
-      upPressed && downPressed
-        ? this.lastPressedTime.up >= this.lastPressedTime.down
-          ? "up"
-          : "down"
-        : upPressed
-        ? "up"
-        : downPressed
-        ? "down"
-        : null;
-
-    const horizontalTime = horizontalDir ? this.lastPressedTime[horizontalDir] : -1;
-    const verticalTime = verticalDir ? this.lastPressedTime[verticalDir] : -1;
-
-    let movingDir = null;
-    if (horizontalDir && verticalDir) {
-      movingDir = horizontalTime >= verticalTime ? horizontalDir : verticalDir;
+      this.playWalk(dir);
     } else {
-      movingDir = horizontalDir ?? verticalDir;
+      body.setVelocity(0, 0);
+      this.stopWalk();
     }
 
-    if (movingDir) this.setFacing(movingDir);
-
-    const body = this.player.body;
-
-    // Run is held on mobile via A-hold, and on keyboard via Shift.
-    const isRunActive = (this.keyShift && this.keyShift.isDown) || this.runHeld;
-    const moveSpeed = isRunActive ? SPEED * RUN_MULT : SPEED;
-
-    body.setVelocity(0);
-    if (moveX !== 0) body.setVelocityX(moveX * moveSpeed);
-    if (moveY !== 0) body.setVelocityY(moveY * moveSpeed);
-    body.velocity.normalize().scale(moveSpeed);
-
-    // Speed up walk animation when running.
-    this.player.anims.timeScale = isRunActive ? RUN_MULT : 1.0;
-
-    const isMoving = body.velocity.lengthSq() > 0.1;
-    if (isMoving && movingDir) this.playWalk(movingDir);
-    else this.stopWalk();
-    if (!isMoving) this.player.anims.timeScale = 1.0;
-
-    this.touch.interact = false;
-
-    const playerBaseY = this.player.body ? this.player.body.bottom : this.player.y;
+    // Depth sort so feet determine overlap
+    const playerBaseY = body.bottom;
     this.player.setDepth(playerBaseY);
     if (this.worldLayer?.sort) this.worldLayer.sort("depth");
   }
@@ -1615,6 +2055,9 @@ new Phaser.Game({
   scale: {
     mode: Phaser.Scale.RESIZE,
     autoCenter: Phaser.Scale.CENTER_BOTH,
+  },
+  dom: {
+    createContainer: true,
   },
   physics: {
     default: "arcade",
