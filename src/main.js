@@ -936,7 +936,7 @@ class RoomScene extends Phaser.Scene {
     this.load.image("studer", "/assets/room/studer.png");
     this.load.image("studer_controller", "/assets/room/studer_controller.png");
     this.load.image("couch", "/assets/room/couch.png");
-    this.load.image("tv", "/assets/room/TV.png");
+    this.load.image("tv", "/assets/room/tv.png");
     this.load.image("ui_dpad", "/assets/ui/dpad.png");
     this.load.image("ui_a", "/assets/ui/abutton.png");
     this.load.image("floor", "/assets/room/floor.png");
