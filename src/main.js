@@ -5,7 +5,7 @@ const GAME_H = 240;
 const WORLD_ZOOM = 1;
 const SPEED = 80;
 const RUN_MULT = 1.8;
-const RUN_HOLD_MS = 150;
+const RUN_HOLD_MS = 110;
 const PLAYER_SCALE = 2;
 const FEET_W = 10;
 const FEET_H = 8;
@@ -86,6 +86,12 @@ class ComputerShop {
       color: "#111111",
       lineSpacing: 4,
     });
+    this.priceList = scene.add.text(0, 0, "", {
+      fontFamily: "monospace",
+      fontSize: "14px",
+      color: "#111111",
+      lineSpacing: 4,
+    });
 
     this.hint = scene.add.text(0, 0, "", {
       fontFamily: "monospace",
@@ -116,6 +122,7 @@ class ComputerShop {
       this.title,
       this.selectBg,
       this.list,
+      this.priceList,
       this.hint,
       this.confirmBorder,
       this.confirmFill,
@@ -282,22 +289,26 @@ class ComputerShop {
     this.metaText.setPosition(metaX + border + 6, metaY + border + 5);
     this.metaText.setWordWrapWidth(Math.max(10, metaW - (border * 2 + 12)));
 
-    // List/title start to the right of the meta box
-    const listX = Math.round(metaX + metaW + 14);
+    // List/title start to the right of the meta box (shifted left slightly to avoid overflow)
+    const listX = Math.round(metaX + metaW + 2);
     const listY = Math.round(panelY + border + pad);
 
     this.title.setPosition(listX, listY);
     this.list.setPosition(listX, Math.round(listY + 22));
     this.hint.setPosition(panelX + border + pad, Math.round(panelY + panelH - border - pad - 14));
 
-    const listRight = Math.round(panelX + panelW - border - pad);
+    const listRight = Math.round(panelX + panelW - border - pad - 12);
     const fontSize = Number.parseInt(this.list.style.fontSize, 10) || 14;
     const lineSpacing = Number.isFinite(this.list.lineSpacing) ? this.list.lineSpacing : 0;
     const lineHeight = Math.max(12, fontSize + lineSpacing);
+    const listRowW = Math.max(10, listRight - listX);
+    this.list.setWordWrapWidth(listRowW);
+    this.priceList.setWordWrapWidth(listRowW);
+    this.priceList.setPosition(listX, Math.round(listY + 22 + lineHeight));
     this._listAnchor = {
       x: listX,
       y: Math.round(listY + 22),
-      rowW: Math.max(10, listRight - listX),
+      rowW: listRowW,
       rowH: lineHeight,
     };
 
@@ -375,6 +386,7 @@ class ComputerShop {
     const anchor = this._listAnchor;
     if (!anchor) return;
     const canSelect = this.isOpen && this.mode === "list";
+    const rowStep = anchor.rowH * 2;
 
     for (let i = 0; i < this.rowHits.length; i++) {
       const hit = this.rowHits[i];
@@ -382,12 +394,12 @@ class ComputerShop {
       hit.setVisible(active);
       if (hit.input) hit.input.enabled = active;
       if (!active) continue;
-      const rowY = Math.round(anchor.y + i * anchor.rowH);
+      const rowY = Math.round(anchor.y + i * rowStep);
       hit.setPosition(anchor.x, rowY);
-      hit.setSize(anchor.rowW, anchor.rowH);
+      hit.setSize(anchor.rowW, rowStep);
       if (hit.input?.hitArea) {
         hit.input.hitArea.width = anchor.rowW;
-        hit.input.hitArea.height = anchor.rowH;
+        hit.input.hitArea.height = rowStep;
       }
     }
   }
@@ -422,15 +434,28 @@ class ComputerShop {
     const pageCount = Math.max(1, Math.ceil(total / size));
 
     const lines = [];
+    const anchor = this._listAnchor;
+    const fontSize = Number.parseInt(this.list.style.fontSize, 10) || 14;
+    const approxCharWidth = fontSize * 0.6;
+    const cols = anchor ? Math.max(1, Math.floor(anchor.rowW / approxCharWidth)) : 1;
     for (let i = 0; i < pageItems.length; i++) {
       const it = pageItems[i];
       const cursor = i === this.index ? "▶" : " ";
       const price = typeof it.price === "number" ? `$${it.price}` : "";
-      lines.push(`${cursor} ${it.name}${price ? ` ${price}` : ""}`);
+      if (price) {
+        const indent = Math.max(1, cols - price.length);
+        lines.push(`${cursor} ${it.name}\n${" ".repeat(indent)}${price}`);
+      } else {
+        lines.push(`${cursor} ${it.name}`);
+      }
     }
     if (!pageItems.length) lines.push("  (No items)");
 
     this.list.setText(lines.join("\n"));
+    if (this.priceList) {
+      this.priceList.setText("");
+      this.priceList.setVisible(false);
+    }
     this.updateRowHits(pageItems.length);
     this.updateSelectionHighlight(pageItems.length);
 
@@ -460,10 +485,11 @@ class ComputerShop {
     this.selectBg.setVisible(!!canShow);
     if (!canShow) return;
 
+    const rowStep = anchor.rowH * 2;
     const rowIndex = Math.max(0, Math.min(visibleCount - 1, this.index));
-    const rowY = Math.round(anchor.y + rowIndex * anchor.rowH);
+    const rowY = Math.round(anchor.y + rowIndex * rowStep);
     this.selectBg.setPosition(anchor.x, rowY);
-    this.selectBg.setSize(anchor.rowW, anchor.rowH);
+    this.selectBg.setSize(anchor.rowW, rowStep);
   }
 
   showConfirm() {
@@ -939,6 +965,8 @@ class RoomScene extends Phaser.Scene {
     this.load.image("tv", "/assets/room/tv.png");
     this.load.image("ui_dpad", "/assets/ui/dpad.png");
     this.load.image("ui_a", "/assets/ui/abutton.png");
+    this.load.image("ui_bezel", "/assets/ui/screen_bezel.png");
+    this.load.image("ui_deck", "/assets/ui/bottom_deck.png");
     this.load.image("floor", "/assets/room/floor.png");
   }
 
@@ -983,16 +1011,23 @@ class RoomScene extends Phaser.Scene {
     // Enable multi-touch (needed to hold D-pad with one finger while pressing A with another).
     // Default is often 1 touch pointer; we want a few.
     this.input.addPointer(3);
+    // Prevent mobile browser gestures from hijacking touches (keeps D-pad/A reliable).
+    try {
+      const c = this.game?.canvas;
+      if (c) c.style.touchAction = "none";
+    } catch {}
 
     this.touch = { left: false, right: false, up: false, down: false, interact: false };
     this.lastPressedTime = { left: 0, right: 0, up: 0, down: 0 };
     this.inputTick = 0;
     this.pendingInteractUntil = 0;
     this.uiBound = false;
+    // Simple mobile input state (stable): D-pad sets direction while held; A triggers action immediately.
+    this.runHeld = false;
     this.aIsDown = false;
     this.aDownAt = 0;
-    this.runHeld = false;
-    this.runArmTimer = null;
+    this.aHoldTimer = null;
+    this.aPointerId = null;
 
     this.gameCam = this.cameras.main;
     this.uiCam = this.cameras.add(0, 0, this.scale.width, this.scale.height);
@@ -1003,6 +1038,10 @@ class RoomScene extends Phaser.Scene {
     this.gameCam.setZoom(WORLD_ZOOM);
     this.gameCam.setScroll(0, 0);
     this.gameCam.setBounds(0, 0, GAME_W, GAME_H);
+
+    this.screenBezel = this.add.image(0, 0, "ui_bezel").setOrigin(0, 0);
+    this.screenBezel.setDepth(20);
+    this.uiLayer.add(this.screenBezel);
 
     const TOP_WALL_Y = 5;
     const TOP_WALL_H = 2;
@@ -1327,53 +1366,58 @@ class RoomScene extends Phaser.Scene {
     if (this.uiBound) return;
     this.uiBound = true;
 
-    this.deckBg = this.add.rectangle(0, 0, 10, 10, 0x000000).setOrigin(0, 0);
+    this.deckBg = this.add.image(0, 0, "ui_deck").setOrigin(0, 0);
     this.uiLayer.add(this.deckBg);
 
     this.dpadVisual = this.add.container(0, 0);
-    const dpadImg = this.add.image(0, 0, "ui_dpad").setOrigin(0.5);
-    this.dpadVisual.add(dpadImg);
+    this.dpadImg = this.add.image(0, 0, "ui_dpad").setOrigin(0.5);
+    this.dpadVisual.add(this.dpadImg);
     this.uiLayer.add(this.dpadVisual);
 
     this.aVisual = this.add.container(0, 0);
-    const aImg = this.add.image(0, 0, "ui_a").setOrigin(0.5);
-    this.aVisual.add(aImg);
+    this.aImg = this.add.image(0, 0, "ui_a").setOrigin(0.5);
+    this.aVisual.add(this.aImg);
     this.uiLayer.add(this.aVisual);
 
-    const dpadRadius = 70;
-    const aVisualRadius = 48;
-    const aHitRadius = 72;
+    const initialDeckHeight = this.getDeckLayout(this.scale.height).deckHeight;
+    const initialMetrics = this.computeControlMetrics(initialDeckHeight);
 
-    if (dpadImg.width > 0) {
-      const desired = dpadRadius * 2;
-      dpadImg.setScale(desired / dpadImg.width);
-    }
-    if (aImg.width > 0) {
-      const desired = aVisualRadius * 2 * 2.0;
-      aImg.setScale(desired / aImg.width);
-    }
-
-    this.dpadHit = this.add.circle(0, 0, dpadRadius, 0x000000, 0.001);
-    this.aHit = this.add.circle(0, 0, aHitRadius, 0x000000, 0.001);
-    // Make both controls independently touchable.
-    this.dpadHit.setInteractive({ useHandCursor: false });
-    this.aHit.setInteractive({ useHandCursor: false });
+    // NOTE: On mobile with multiple cameras, Phaser's interactive hit-testing can be unreliable.
+    // We keep these circles only as geometry references (manual hit-test), not as interactive objects.
+    this.dpadHit = this.add.circle(0, 0, initialMetrics.dpadRadius, 0x000000, 0.001);
+    this.aHit = this.add.circle(0, 0, initialMetrics.aHitRadius, 0x000000, 0.001);
 
     this.uiLayer.add([this.dpadHit, this.aHit]);
+    this.applyControlMetrics(initialMetrics);
 
     this.dpadPointerId = null;
-    const deadzone = 10;
+    this.aPointerId = null;
 
-    const handleDpadPointer = (pointer) => {
+    // --- Manual touch hit-testing (robust on mobile) ---
+    const uiPoint = (pointer) => pointer.positionToCamera(this.uiCam);
+
+    const inCircle = (px, py, cx, cy, r) => {
+      const dx = px - cx;
+      const dy = py - cy;
+      return dx * dx + dy * dy <= r * r;
+    };
+
+    const clearAHoldTimer = () => {
+      if (this.aHoldTimer) {
+        this.aHoldTimer.remove(false);
+        this.aHoldTimer = null;
+      }
+    };
+
+    const handleDpadAtPoint = (px, py) => {
       if (this.dialogOpen) return;
 
-      // Use UI camera coordinates so the D-pad works regardless of game camera viewport.
-      const camPoint = pointer.positionToCamera(this.uiCam);
       const cx = this.dpadHit.x;
       const cy = this.dpadHit.y;
-      const dx = camPoint.x - cx;
-      const dy = camPoint.y - cy;
+      const dx = px - cx;
+      const dy = py - cy;
       const dist = Math.sqrt(dx * dx + dy * dy);
+      const deadzone = 10;
 
       if (!Number.isFinite(dist) || dist < deadzone) {
         this.touch.left = this.touch.right = this.touch.up = this.touch.down = false;
@@ -1392,110 +1436,154 @@ class RoomScene extends Phaser.Scene {
       this.touch.down = dir === "down";
 
       this.lastPressedTime[dir] = this.inputTick;
-      // When shop is open, don't change facing; cursor movement is handled in update() via touch states.
-      if (!this.shop?.isOpen) {
-        this.setFacing(dir);
-      }
+      if (!this.shop?.isOpen) this.setFacing(dir);
     };
 
-    this.dpadHit.on("pointerdown", (ptr) => {
-      if (this.dialogOpen) return;
-      // Always re-claim on tap (helps iOS double-tap edge cases)
-      this.dpadPointerId = null;
-      this.dpadPointerId = ptr.id;
-      handleDpadPointer(ptr);
-    });
-
-    this.input.on("pointermove", (pointer) => {
-      if (this.dpadPointerId === null) return;
-      if (pointer.id !== this.dpadPointerId) return;
-      handleDpadPointer(pointer);
-    });
-
-    const clearDpad = (pointer) => {
-      if (pointer.id !== this.dpadPointerId) return;
-      this.dpadPointerId = null;
-      this.touch.left = this.touch.right = this.touch.up = this.touch.down = false;
-    };
-
-    this.input.on("pointerup", clearDpad);
-    this.input.on("pointerupoutside", clearDpad);
-    this.input.on("pointercancel", clearDpad);
-
-    this.aHit.on("pointerdown", (p) => {
-      p.event?.preventDefault?.();
-      p.event?.stopPropagation?.();
-
-      const now = this.time.now;
-
-      // If TV is open, A should unlock sound (if needed) or close.
+    const startAButton = (now) => {
+      // If an overlay is open, A behaves as action (not run).
       if (this.tvOverlay?.isOpen) {
         if (!this.tvOverlay.soundUnlocked) this.tvOverlay.enableSoundFromGesture();
         else this.tvOverlay.close();
-        this.touch.interact = false;
         return;
       }
 
-      // If the shop is open, A should operate the shop (and unlock audio) and never arm run.
       if (this.shop?.isOpen) {
         this.shop.unlockAudioFromGesture();
-        this.shop.layout(this.gameCam);
         this.shop.tick(now, { left: false, right: false, up: false, down: false, aJust: true, backJust: false });
         return;
       }
 
-      // If dialog is open, A always advances/closes immediately (no running).
       if (this.dialogOpen) {
         this.handleA(now);
         return;
       }
 
-      // Arm a hold-to-run gesture on mobile.
+      // Movement mode: start a hold timer. Only enable run after the hold threshold.
       this.aIsDown = true;
       this.aDownAt = now;
       this.runHeld = false;
 
-      if (this.runArmTimer) {
-        this.runArmTimer.remove(false);
-        this.runArmTimer = null;
-      }
-
-      this.runArmTimer = this.time.delayedCall(RUN_HOLD_MS, () => {
-        // Only start running if still held and no dialog popped.
-        if (this.aIsDown && !this.dialogOpen) {
+      clearAHoldTimer();
+      this.aHoldTimer = this.time.delayedCall(RUN_HOLD_MS, () => {
+        if (this.aIsDown && !this.dialogOpen && !this.shop?.isOpen && !this.tvOverlay?.isOpen) {
           this.runHeld = true;
         }
       });
-    });
+    };
 
-    const endAHold = (p) => {
-      // End running on release.
-      const now = this.time.now;
+    const releaseAButton = (now) => {
       const wasDown = this.aIsDown;
-      const heldMs = wasDown ? now - this.aDownAt : 0;
+      const wasRunning = this.runHeld;
 
       this.aIsDown = false;
-      const wasRunning = this.runHeld;
       this.runHeld = false;
+      clearAHoldTimer();
 
-      if (this.runArmTimer) {
-        this.runArmTimer.remove(false);
-        this.runArmTimer = null;
-      }
-
-      // Treat short press as a tap-to-interact.
-      // If it was a run hold, do NOT trigger dialog.
-      if (!this.dialogOpen && wasDown && !wasRunning && heldMs < RUN_HOLD_MS) {
+      // If we were in movement mode and did NOT enter run, treat as a tap -> interact.
+      if (wasDown && !wasRunning && !this.dialogOpen && !this.shop?.isOpen && !this.tvOverlay?.isOpen) {
         this.handleA(now);
       }
     };
 
-    this.aHit.on("pointerup", endAHold);
-    this.aHit.on("pointerupoutside", endAHold);
-    this.aHit.on("pointerout", endAHold);
+    const clearDpad = () => {
+      this.dpadPointerId = null;
+      this.touch.left = this.touch.right = this.touch.up = this.touch.down = false;
+    };
+
+    const clearA = () => {
+      this.aPointerId = null;
+      releaseAButton(this.time.now);
+    };
+
+    this.input.on("pointerdown", (pointer) => {
+      if (this.dialogOpen) return;
+      pointer.event?.preventDefault?.();
+      pointer.event?.stopPropagation?.();
+
+      const p = uiPoint(pointer);
+
+      // Claim D-pad pointer if inside D-pad circle.
+      if (this.dpadPointerId === null) {
+        const r = this.dpadHit.radius;
+        if (inCircle(p.x, p.y, this.dpadHit.x, this.dpadHit.y, r)) {
+          this.dpadPointerId = pointer.id;
+          handleDpadAtPoint(p.x, p.y);
+          return;
+        }
+      }
+
+      // Claim A pointer if inside A circle.
+      if (this.aPointerId === null) {
+        const r = this.aHit.radius;
+        if (inCircle(p.x, p.y, this.aHit.x, this.aHit.y, r)) {
+          this.aPointerId = pointer.id;
+          startAButton(this.time.now);
+          return;
+        }
+      }
+    });
+
+    this.input.on("pointermove", (pointer) => {
+      const p = uiPoint(pointer);
+
+      if (this.dpadPointerId !== null && pointer.id === this.dpadPointerId) {
+        handleDpadAtPoint(p.x, p.y);
+      }
+
+      // We do NOT need pointer-move handling for A.
+    });
+
+    const onPointerEnd = (pointer) => {
+      pointer?.event?.preventDefault?.();
+      pointer?.event?.stopPropagation?.();
+
+      if (this.dpadPointerId !== null && pointer.id === this.dpadPointerId) {
+        clearDpad();
+      }
+
+      if (this.aPointerId !== null && pointer.id === this.aPointerId) {
+        clearA();
+      }
+    };
+
+    this.input.on("pointerup", onPointerEnd);
+    this.input.on("pointerupoutside", onPointerEnd);
+    this.input.on("pointercancel", onPointerEnd);
 
     // Always position the UI immediately after creating controls.
     this.layout();
+  }
+
+  getDeckLayout(canvasH) {
+    const vpH = Math.round(GAME_H * WORLD_ZOOM);
+    const minDeck = 160;
+    const preferredDeck = Math.max(minDeck, Math.floor(canvasH * 0.32));
+    const maxDeck = Math.max(0, canvasH - vpH);
+    const deckHeight = Math.min(preferredDeck, maxDeck);
+    const deckTop = canvasH - deckHeight;
+    return { deckHeight, deckTop };
+  }
+
+  computeControlMetrics(deckHeight) {
+    const dpadRadius = Math.round(Phaser.Math.Clamp(deckHeight * 0.28, 70, 90));
+    const aVisualRadius = Math.round(Phaser.Math.Clamp(deckHeight * 0.2, 36, 46));
+    const aHitRadius = Math.round(Phaser.Math.Clamp(aVisualRadius * 1.9, 68, 80));
+    return { dpadRadius, aVisualRadius, aHitRadius };
+  }
+
+  applyControlMetrics(metrics) {
+    this.uiMetrics = metrics;
+    if (this.dpadImg && this.dpadImg.width > 0) {
+      const desired = Math.round(metrics.dpadRadius * 2);
+      this.dpadImg.setScale(desired / this.dpadImg.width);
+    }
+    if (this.aImg && this.aImg.width > 0) {
+      const desired = Math.round(metrics.aVisualRadius * 2);
+      this.aImg.setScale(desired / this.aImg.width);
+    }
+
+    if (this.dpadHit) this.dpadHit.setRadius(metrics.dpadRadius);
+    if (this.aHit) this.aHit.setRadius(metrics.aHitRadius);
   }
 
   layout() {
@@ -1504,19 +1592,26 @@ class RoomScene extends Phaser.Scene {
 
     const vpW = Math.round(GAME_W * WORLD_ZOOM);
     const vpH = Math.round(GAME_H * WORLD_ZOOM);
-    const minDeck = 160;
-    const preferredDeck = Math.max(minDeck, Math.floor(canvasH * 0.32));
-    const maxDeck = Math.max(0, canvasH - vpH);
-    const deckHeight = Math.min(preferredDeck, maxDeck);
-    const deckTop = canvasH - deckHeight;
+    const { deckHeight, deckTop } = this.getDeckLayout(canvasH);
 
     // Clamp viewport so small screens never produce a negative viewport X (which shifts everything left).
     const vpX = Math.max(0, Math.floor((canvasW - vpW) / 2));
-    const vpY = Math.max(0, Math.floor((deckTop - vpH) / 2) - 50);
+    const vpY = Math.max(0, Math.floor((deckTop - vpH) / 2));
 
     this.gameCam.setViewport(vpX, vpY, vpW, vpH);
     this.gameCam.setScroll(0, 0);
     this.uiCam.setViewport(0, 0, canvasW, canvasH);
+
+    if (this.screenBezel) {
+      const scaleFactor = this.gameCam.width / 320;
+      const bezelW = Math.round(352 * scaleFactor);
+      const bezelH = Math.round(272 * scaleFactor);
+      const bezelX = Math.round(this.gameCam.x - 16 * scaleFactor);
+      const bezelY = Math.round(this.gameCam.y - 16 * scaleFactor);
+      this.screenBezel.setPosition(bezelX, bezelY);
+      this.screenBezel.setDisplaySize(bezelW, bezelH);
+      this.screenBezel.setScrollFactor(0);
+    }
 
     if (this.dialogContainer && this.dialogBorder && this.dialogFill && this.dialogText) {
       const margin = 8;
@@ -1546,11 +1641,26 @@ class RoomScene extends Phaser.Scene {
       this.deckBg.setDisplaySize(canvasW, deckHeight);
     }
 
+    const metrics = this.computeControlMetrics(deckHeight);
+    this.applyControlMetrics(metrics);
+
     const pad = 24;
-    const dpadX = pad + 70;
-    const dpadY = deckTop + deckHeight / 2 - 25;
-    const aX = canvasW - (pad + 70);
-    const aY = dpadY;
+    const dpadX = Math.round(
+      Phaser.Math.Clamp(pad + metrics.dpadRadius, metrics.dpadRadius, canvasW - metrics.dpadRadius)
+    );
+    const aX = Math.round(
+      Phaser.Math.Clamp(
+        canvasW - (pad + metrics.aHitRadius),
+        metrics.aHitRadius,
+        canvasW - metrics.aHitRadius
+      )
+    );
+    const dpadY = Math.round(
+      Phaser.Math.Clamp(deckTop + deckHeight * 0.5, deckTop + metrics.dpadRadius, canvasH - metrics.dpadRadius)
+    );
+    const aY = Math.round(
+      Phaser.Math.Clamp(deckTop + deckHeight * 0.5, deckTop + metrics.aHitRadius, canvasH - metrics.aHitRadius)
+    );
 
     if (this.dpadVisual) this.dpadVisual.setPosition(dpadX, dpadY);
     if (this.aVisual) this.aVisual.setPosition(aX, aY);
@@ -1880,11 +1990,6 @@ class RoomScene extends Phaser.Scene {
   }
 
   update() {
-    // Debug heartbeat (kept lightweight)
-    if (!this.__t) this.__t = 0;
-    this.__t += 1;
-    if (this.__t % 240 === 0) console.log("update tick", this.__t);
-
     this.inputTick += 1;
     const now = this.time.now;
 
@@ -2010,8 +2115,8 @@ class RoomScene extends Phaser.Scene {
     const upPressed = (this.cursors?.up?.isDown || false) || !!this.touch.up;
     const downPressed = (this.cursors?.down?.isDown || false) || !!this.touch.down;
 
-    // Mobile run latch (hold A) OR desktop Shift
-    const running = !!this.runHeld || (!!this.keyShift && this.keyShift.isDown);
+    // Simple movement speed: desktop Shift can run; mobile A is reserved for action.
+    const running = (!!this.keyShift && this.keyShift.isDown) || !!this.runHeld;
     const speed = SPEED * (running ? RUN_MULT : 1);
 
     let vx = 0;

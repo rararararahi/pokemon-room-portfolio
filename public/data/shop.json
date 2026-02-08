@@ -2,7 +2,7 @@
   "pageSize": 6,
   "items": [
     {"id":"beat01","name":"InTheClub","price":100,"preview":"/previews/in_the_club_128bpm.mp3","buyUrl":"https://example.com/replace-with-your-payment-link"},
-    {"id":"beat02","name":"Beat02","price":100,"preview":"/previews/beat02_120bpm.mp3","buyUrl":"https://example.com/replace-with-your-payment-link"},
+    {"id":"beat02","name":"Overstimmyed","price":100,"preview":"/previews/overstimmyed_200bpm_preview.mp3","buyUrl":"https://example.com/replace-with-your-payment-link"},
     {"id":"beat03","name":"Beat03","price":100,"preview":"/previews/beat03_120bpm.mp3","buyUrl":"https://example.com/replace-with-your-payment-link"},
     {"id":"beat04","name":"Beat04","price":100,"preview":"/previews/beat04_120bpm.mp3","buyUrl":"https://example.com/replace-with-your-payment-link"},
     {"id":"beat05","name":"Beat05","price":100,"preview":"/previews/beat05_120bpm.mp3","buyUrl":"https://example.com/replace-with-your-payment-link"},
