@@ -12,7 +12,251 @@ const FEET_H = 8;
 const FEET_OFFSET_X = 3;
 const FEET_OFFSET_Y = 8;
 
+
 const DEBUG_UI = false;
+
+// --- Main Game Music (shuffled playlist; pauses for TV/Shop) ---
+class GameMusic {
+  constructor(scene) {
+    this.scene = scene;
+    this.tracks = [];
+    this.bag = [];
+    this.currentTrackPath = "";
+
+    this.audio = new Audio();
+    this.audio.preload = "auto";
+    this.audio.loop = false;
+    this.audio.volume = 0.8;
+
+    this.unlocked = false;
+    this.pendingMusicStart = false;
+    this.isPausedByOverlay = false;
+
+    // Autoplay policy helper: try to start muted on load, then unmute on first gesture.
+    this.pendingUnmute = false;
+
+    this._onEnded = () => {
+      if (this.isOverlayOpen()) {
+        this.isPausedByOverlay = true;
+        this.pendingMusicStart = true;
+        return;
+      }
+      this.playNext("ended");
+    };
+
+    this.audio.addEventListener("ended", this._onEnded);
+  }
+
+  normalizeTrackPath(trackPath) {
+    if (typeof trackPath !== "string") return "";
+    const raw = trackPath.trim();
+    if (!raw) return "";
+
+    if (raw.startsWith("/game_music/")) return raw;
+    if (raw.startsWith("game_music/")) return `/${raw}`;
+    if (raw.startsWith("/public/game_music/")) return raw.replace("/public", "");
+    if (raw.startsWith("public/game_music/")) return `/${raw.replace(/^public\//, "")}`;
+
+    const marker = raw.indexOf("game_music/");
+    if (marker >= 0) return `/${raw.slice(marker)}`;
+
+    const file = raw.split("/").pop();
+    return file ? `/game_music/${file}` : "";
+  }
+
+  async load() {
+    try {
+      const res = await fetch("/data/game_music.json", { cache: "no-store" });
+      if (!res.ok) throw new Error(`game_music.json HTTP ${res.status}`);
+      const json = await res.json();
+      if (json && Array.isArray(json.tracks) && json.tracks.length) {
+        this.tracks = json.tracks
+          .map((trackPath) => this.normalizeTrackPath(trackPath))
+          .filter(Boolean);
+      }
+      console.log("[GameMusic] loaded tracks:", this.tracks);
+    } catch (e) {
+      console.error("[GameMusic] failed to fetch /data/game_music.json:", e);
+      this.tracks = [
+        "/game_music/wavygravy_davy_126bpm_mainmusic.mp3",
+        "/game_music/nightywhitey_130bpm_mainmusic.mp3",
+      ];
+      console.log("[GameMusic] loaded tracks (fallback):", this.tracks);
+    }
+
+    this.resetBag();
+  }
+
+  isOverlayOpen() {
+    return !!(this.scene?.tvOverlay?.isOpen || this.scene?.shop?.isOpen);
+  }
+
+  shuffleInPlace(arr) {
+    // Simple shuffle (good enough; not crypto/random-perfect)
+    for (let i = arr.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+  }
+
+  resetBag() {
+    this.bag = [...this.tracks];
+    this.shuffleInPlace(this.bag);
+  }
+
+  pickNext() {
+    if (!this.tracks.length) return "";
+    if (!this.bag.length) this.resetBag();
+    return this.bag.pop() || "";
+  }
+
+  setTrack(trackPath) {
+    this.currentTrackPath = trackPath || "";
+    if (!this.currentTrackPath) return false;
+    this.audio.src = this.currentTrackPath;
+    console.log("[GameMusic] current track:", this.currentTrackPath);
+    return true;
+  }
+
+  playCurrent(reason) {
+    if (!this.audio.src) return false;
+    if (this.isOverlayOpen()) return false;
+
+    try {
+      const p = this.audio.play();
+      if (p && typeof p.then === "function") {
+        p.then(() => {
+          this.unlocked = true;
+          this.pendingMusicStart = false;
+          console.log(`[GameMusic] play() success (${reason}):`, this.currentTrackPath);
+        }).catch((err) => {
+          this.pendingMusicStart = true;
+          console.warn(`[GameMusic] play() failed (${reason}):`, this.currentTrackPath, err);
+        });
+      } else {
+        this.unlocked = true;
+        this.pendingMusicStart = false;
+        console.log(`[GameMusic] play() success (${reason}):`, this.currentTrackPath);
+      }
+      return true;
+    } catch (err) {
+      this.pendingMusicStart = true;
+      console.warn(`[GameMusic] play() failed (${reason}):`, this.currentTrackPath, err);
+      return false;
+    }
+  }
+
+  startOnLoad() {
+    if (!this.tracks.length) return;
+    if (this.isOverlayOpen()) {
+      this.pendingMusicStart = true;
+      return;
+    }
+
+    const next = this.pickNext();
+    if (!next) return;
+
+    this.setTrack(next);
+
+    // Try to autoplay muted (usually allowed on desktop + mobile). We'll unmute on first gesture.
+    this.audio.muted = true;
+    this.pendingUnmute = true;
+
+    const ok = this.playCurrent("create-muted");
+    if (!ok) this.pendingMusicStart = true;
+  }
+
+  startFromGesture() {
+    if (!this.tracks.length) return;
+
+    // If we already started muted on load, the first gesture should unmute.
+    if (this.pendingUnmute) {
+      this.audio.muted = false;
+      this.pendingUnmute = false;
+      // If audio is already playing, unmute is enough.
+      if (!this.audio.paused) {
+        this.unlocked = true;
+        this.pendingMusicStart = false;
+        console.log("[GameMusic] unmuted on gesture:", this.currentTrackPath);
+        return;
+      }
+      // If it paused/never started, fall through and attempt play.
+    }
+
+    if (!this.pendingMusicStart && this.unlocked && !this.audio.paused) return;
+
+    if (this.isOverlayOpen()) {
+      this.pendingMusicStart = true;
+      return;
+    }
+
+    if (!this.audio.src) {
+      const next = this.pickNext();
+      if (!next) return;
+      this.setTrack(next);
+    }
+
+    // Ensure audible on gesture.
+    this.audio.muted = false;
+    this.playCurrent("gesture");
+  }
+
+  pauseForOverlay() {
+    if (this.isPausedByOverlay) return;
+    this.isPausedByOverlay = true;
+    if (this.audio.muted) this.pendingUnmute = true;
+    try {
+      if (!this.audio.paused) this.audio.pause();
+    } catch {}
+  }
+
+  resumeAfterOverlay() {
+    if (!this.isPausedByOverlay) return;
+    if (this.isOverlayOpen()) return;
+    this.isPausedByOverlay = false;
+
+    if (!this.unlocked) {
+      this.pendingMusicStart = true;
+      return;
+    }
+
+    // If we still need a gesture to unmute, keep it muted for resume.
+    if (this.pendingUnmute) this.audio.muted = true;
+
+    if (this.audio.src) {
+      this.playCurrent("resume");
+    } else {
+      this.playNext("resume");
+    }
+  }
+
+  playNext(reason = "next") {
+    if (!this.tracks.length) return;
+    if (!this.unlocked) {
+      this.pendingMusicStart = true;
+      return;
+    }
+    if (this.isOverlayOpen()) {
+      this.isPausedByOverlay = true;
+      this.pendingMusicStart = true;
+      return;
+    }
+
+    const next = this.pickNext();
+    if (!next) return;
+    this.setTrack(next);
+    this.playCurrent(reason);
+  }
+
+  destroy() {
+    this.audio.removeEventListener("ended", this._onEnded);
+    try {
+      this.audio.pause();
+      this.audio.src = "";
+    } catch {}
+  }
+}
+// --- end Main Game Music ---
 
 // --- Computer Shop (Pokémon-style overlay w/ iOS-safe preview autoplay) ---
 class ComputerShop {
@@ -76,26 +320,26 @@ class ComputerShop {
 
     this.title = scene.add.text(0, 0, "POKEPUTER", {
       fontFamily: "monospace",
-      fontSize: "14px",
+      fontSize: "13px",
       color: "#111111",
     });
 
     this.list = scene.add.text(0, 0, "", {
       fontFamily: "monospace",
-      fontSize: "14px",
+      fontSize: "13px",
       color: "#111111",
-      lineSpacing: 4,
+      lineSpacing: 3,
     });
     this.priceList = scene.add.text(0, 0, "", {
       fontFamily: "monospace",
-      fontSize: "14px",
+      fontSize: "13px",
       color: "#111111",
-      lineSpacing: 4,
+      lineSpacing: 3,
     });
 
     this.hint = scene.add.text(0, 0, "", {
       fontFamily: "monospace",
-      fontSize: "12px",
+      fontSize: "11px",
       color: "#111111",
     });
 
@@ -153,14 +397,14 @@ class ComputerShop {
       // Fallback demo data so the UI is testable even before shop.json exists.
       console.warn("ComputerShop: failed to load /data/shop.json, using fallback", e);
       this.data = {
-        pageSize: 6,
+        pageSize: 5,
         items: [
           { id: "beat1", name: "BEAT 01", price: 100, preview: "/previews/beat01.mp3", buyUrl: "" },
           { id: "beat2", name: "BEAT 02", price: 100, preview: "/previews/beat02.mp3", buyUrl: "" },
           { id: "beat3", name: "BEAT 03", price: 100, preview: "/previews/beat03.mp3", buyUrl: "" },
           { id: "beat4", name: "BEAT 04", price: 100, preview: "/previews/beat04.mp3", buyUrl: "" },
-          { id: "beat5", name: "BEAT 05", price: 100, preview: "/previews/beat05.mp3", buyUrl: "" },
           { id: "coffee", name: "BUY ME A COFFEE", price: 5, preview: "/previews/coffee.mp3", buyUrl: "" },
+          { id: "beat5", name: "BEAT 05", price: 100, preview: "/previews/beat05.mp3", buyUrl: "" },
         ],
       };
       this.page = 0;
@@ -300,7 +544,7 @@ class ComputerShop {
     const listRight = Math.round(panelX + panelW - border - pad - 12);
     const fontSize = Number.parseInt(this.list.style.fontSize, 10) || 14;
     const lineSpacing = Number.isFinite(this.list.lineSpacing) ? this.list.lineSpacing : 0;
-    const lineHeight = Math.max(12, fontSize + lineSpacing);
+    const lineHeight = Math.max(11, fontSize + lineSpacing);
     const listRowW = Math.max(10, listRight - listX);
     this.list.setWordWrapWidth(listRowW);
     this.priceList.setWordWrapWidth(listRowW);
@@ -618,16 +862,34 @@ class ComputerShop {
     if (this.mode === "list") {
       if (canMove && up) {
         this.lastMoveAt = now;
-        this.moveSelection(-1);
+        // If we're at the top of a non-first page, wrap to previous page (select last item).
+        if (this.index <= 0 && this.page > 0) {
+          const total = this.data?.items?.length || 0;
+          const size = this.data?.pageSize || 6;
+          const pageCount = Math.max(1, Math.ceil(total / size));
+          this.page = Math.max(0, Math.min(pageCount - 1, this.page - 1));
+          const prevPageItems = this.pageItems();
+          this.index = Math.max(0, prevPageItems.length - 1);
+          this.render();
+          this.autoplaySelection();
+        } else {
+          this.moveSelection(-1);
+        }
       } else if (canMove && down) {
         this.lastMoveAt = now;
-        this.moveSelection(1);
-      } else if (canMove && left) {
-        this.lastMoveAt = now;
-        this.movePage(-1);
-      } else if (canMove && right) {
-        this.lastMoveAt = now;
-        this.movePage(1);
+        const page = this.pageItems();
+        // If we're at the bottom of the page, advance to next page (select first item).
+        if (page.length && this.index >= page.length - 1) {
+          const total = this.data?.items?.length || 0;
+          const size = this.data?.pageSize || 6;
+          const pageCount = Math.max(1, Math.ceil(total / size));
+          this.page = Math.max(0, Math.min(pageCount - 1, this.page + 1));
+          this.index = 0;
+          this.render();
+          this.autoplaySelection();
+        } else {
+          this.moveSelection(1);
+        }
       }
 
       if (aJust) {
@@ -965,6 +1227,7 @@ class RoomScene extends Phaser.Scene {
     this.load.image("tv", "/assets/room/tv.png");
     this.load.image("ui_dpad", "/assets/ui/dpad.png");
     this.load.image("ui_a", "/assets/ui/abutton.png");
+    this.load.image("ui_b", "/assets/ui/bbutton.png");
     this.load.image("ui_bezel", "/assets/ui/screen_bezel.png");
     this.load.image("ui_deck", "/assets/ui/bottom_deck.png");
     this.load.image("floor", "/assets/room/floor.png");
@@ -1028,6 +1291,7 @@ class RoomScene extends Phaser.Scene {
     this.aDownAt = 0;
     this.aHoldTimer = null;
     this.aPointerId = null;
+    this.bPointerId = null;
 
     this.gameCam = this.cameras.main;
     this.uiCam = this.cameras.add(0, 0, this.scale.width, this.scale.height);
@@ -1309,6 +1573,23 @@ class RoomScene extends Phaser.Scene {
     this.tvBag = [];
     this.loadTvVideos();
 
+    // Main background music (shuffles on each load; pauses when TV/Shop are open)
+    this.gameMusic = new GameMusic(this);
+    this.gameMusic.load().then(() => {
+      // Attempt to start immediately (desktop). If blocked, helper sets pendingMusicStart.
+      this.gameMusic.startOnLoad();
+    });
+    this._onMusicGesture = () => {
+      if (this.gameMusic) this.gameMusic.startFromGesture();
+    };
+    this.input.on("pointerdown", this._onMusicGesture);
+    this.input.keyboard?.on("keydown", this._onMusicGesture);
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.input.off("pointerdown", this._onMusicGesture);
+      this.input.keyboard?.off("keydown", this._onMusicGesture);
+      this.gameMusic?.destroy?.();
+    });
+
     this.dialogOpen = false;
     this.dialogTyping = false;
     this.fullDialogText = "";
@@ -1379,6 +1660,11 @@ class RoomScene extends Phaser.Scene {
     this.aVisual.add(this.aImg);
     this.uiLayer.add(this.aVisual);
 
+    this.bVisual = this.add.container(0, 0);
+    this.bImg = this.add.image(0, 0, "ui_b").setOrigin(0.5);
+    this.bVisual.add(this.bImg);
+    this.uiLayer.add(this.bVisual);
+
     const initialDeckHeight = this.getDeckLayout(this.scale.height).deckHeight;
     const initialMetrics = this.computeControlMetrics(initialDeckHeight);
 
@@ -1386,12 +1672,42 @@ class RoomScene extends Phaser.Scene {
     // We keep these circles only as geometry references (manual hit-test), not as interactive objects.
     this.dpadHit = this.add.circle(0, 0, initialMetrics.dpadRadius, 0x000000, 0.001);
     this.aHit = this.add.circle(0, 0, initialMetrics.aHitRadius, 0x000000, 0.001);
+    this.bHit = this.add.circle(0, 0, initialMetrics.bHitRadius, 0x000000, 0.001);
 
-    this.uiLayer.add([this.dpadHit, this.aHit]);
+    this.uiLayer.add([this.dpadHit, this.aHit, this.bHit]);
     this.applyControlMetrics(initialMetrics);
 
     this.dpadPointerId = null;
     this.aPointerId = null;
+    this.bPointerId = null;
+    const pressBButton = (now) => {
+      // TV: B closes
+      if (this.tvOverlay?.isOpen) {
+        this.tvOverlay.close();
+        return;
+      }
+
+      // Shop: B backs out / closes
+      if (this.shop?.isOpen) {
+        this.shop.tick(now, { left: false, right: false, up: false, down: false, aJust: false, backJust: true });
+        return;
+      }
+
+      // Dialog: B advances typing or closes
+      if (this.dialogOpen) {
+        if (this.dialogTyping) this.finishTyping();
+        else this.closeDialog();
+        // Prevent “stuck” movement after closing
+        this.touch.left = this.touch.right = this.touch.up = this.touch.down = false;
+        this.dpadPointerId = null;
+        const body = this.player?.body;
+        if (body) body.setVelocity(0);
+        this.stopWalk();
+        return;
+      }
+
+      // Default: no-op
+    };
 
     // --- Manual touch hit-testing (robust on mobile) ---
     const uiPoint = (pointer) => pointer.positionToCamera(this.uiCam);
@@ -1495,10 +1811,16 @@ class RoomScene extends Phaser.Scene {
       releaseAButton(this.time.now);
     };
 
+    const clearB = () => {
+      this.bPointerId = null;
+    };
+
     this.input.on("pointerdown", (pointer) => {
-      if (this.dialogOpen) return;
       pointer.event?.preventDefault?.();
       pointer.event?.stopPropagation?.();
+
+      // Any touch counts as a user gesture for iOS-safe music unlock/start.
+      if (this.gameMusic) this.gameMusic.startFromGesture();
 
       const p = uiPoint(pointer);
 
@@ -1518,6 +1840,16 @@ class RoomScene extends Phaser.Scene {
         if (inCircle(p.x, p.y, this.aHit.x, this.aHit.y, r)) {
           this.aPointerId = pointer.id;
           startAButton(this.time.now);
+          return;
+        }
+      }
+
+      // Claim B pointer if inside B circle.
+      if (this.bPointerId === null) {
+        const r = this.bHit.radius;
+        if (inCircle(p.x, p.y, this.bHit.x, this.bHit.y, r)) {
+          this.bPointerId = pointer.id;
+          pressBButton(this.time.now);
           return;
         }
       }
@@ -1544,6 +1876,9 @@ class RoomScene extends Phaser.Scene {
       if (this.aPointerId !== null && pointer.id === this.aPointerId) {
         clearA();
       }
+      if (this.bPointerId !== null && pointer.id === this.bPointerId) {
+        clearB();
+      }
     };
 
     this.input.on("pointerup", onPointerEnd);
@@ -1568,7 +1903,9 @@ class RoomScene extends Phaser.Scene {
     const dpadRadius = Math.round(Phaser.Math.Clamp(deckHeight * 0.28, 70, 90));
     const aVisualRadius = Math.round(Phaser.Math.Clamp(deckHeight * 0.2, 36, 46));
     const aHitRadius = Math.round(Phaser.Math.Clamp(aVisualRadius * 1.9, 68, 80));
-    return { dpadRadius, aVisualRadius, aHitRadius };
+    const bVisualRadius = aVisualRadius;
+    const bHitRadius = aHitRadius;
+    return { dpadRadius, aVisualRadius, aHitRadius, bVisualRadius, bHitRadius };
   }
 
   applyControlMetrics(metrics) {
@@ -1581,9 +1918,14 @@ class RoomScene extends Phaser.Scene {
       const desired = Math.round(metrics.aVisualRadius * 2);
       this.aImg.setScale(desired / this.aImg.width);
     }
+    if (this.bImg && this.bImg.width > 0) {
+      const desired = Math.round(metrics.bVisualRadius * 2);
+      this.bImg.setScale(desired / this.bImg.width);
+    }
 
     if (this.dpadHit) this.dpadHit.setRadius(metrics.dpadRadius);
     if (this.aHit) this.aHit.setRadius(metrics.aHitRadius);
+    if (this.bHit) this.bHit.setRadius(metrics.bHitRadius);
   }
 
   layout() {
@@ -1648,24 +1990,45 @@ class RoomScene extends Phaser.Scene {
     const dpadX = Math.round(
       Phaser.Math.Clamp(pad + metrics.dpadRadius, metrics.dpadRadius, canvasW - metrics.dpadRadius)
     );
+    const abShiftRight = 46;
+    const aRightInset = Math.round(metrics.aHitRadius * 0.35);
     const aX = Math.round(
       Phaser.Math.Clamp(
-        canvasW - (pad + metrics.aHitRadius),
+        canvasW - (pad + metrics.aHitRadius) + abShiftRight,
         metrics.aHitRadius,
-        canvasW - metrics.aHitRadius
+        canvasW - aRightInset
       )
     );
     const dpadY = Math.round(
       Phaser.Math.Clamp(deckTop + deckHeight * 0.5, deckTop + metrics.dpadRadius, canvasH - metrics.dpadRadius)
     );
-    const aY = Math.round(
+    const baseAY = Math.round(
       Phaser.Math.Clamp(deckTop + deckHeight * 0.5, deckTop + metrics.aHitRadius, canvasH - metrics.aHitRadius)
+    );
+    const aRaise = 16;
+    const aY = Math.round(
+      Phaser.Math.Clamp(baseAY - aRaise, deckTop + metrics.aHitRadius, canvasH - metrics.aHitRadius)
+    );
+    const diagX = Math.round(metrics.aHitRadius * 1.25);
+    const diagY = Math.round(metrics.aHitRadius * 0.7);
+    const bX = Math.round(
+      Phaser.Math.Clamp(
+        aX - diagX,
+        metrics.bHitRadius,
+        canvasW - Math.round(metrics.bHitRadius * 0.35)
+      )
+    );
+    const bLower = 6;
+    const bY = Math.round(
+      Phaser.Math.Clamp(baseAY + diagY + bLower, deckTop + metrics.bHitRadius, canvasH - metrics.bHitRadius)
     );
 
     if (this.dpadVisual) this.dpadVisual.setPosition(dpadX, dpadY);
     if (this.aVisual) this.aVisual.setPosition(aX, aY);
+    if (this.bVisual) this.bVisual.setPosition(bX, bY);
     if (this.dpadHit) this.dpadHit.setPosition(dpadX, dpadY);
     if (this.aHit) this.aHit.setPosition(aX, aY);
+    if (this.bHit) this.bHit.setPosition(bX, bY);
 
     if (this.shop) this.shop.layout(this.gameCam);
     if (this.tvOverlay) this.tvOverlay.layout(this.gameCam);
@@ -2010,6 +2373,9 @@ class RoomScene extends Phaser.Scene {
       if (body) body.setVelocity(0);
       this.stopWalk();
 
+      // Pause main music while TV is open
+      if (this.gameMusic) this.gameMusic.pauseForOverlay();
+
       // Keep overlay sized to the GBA viewport
       this.tvOverlay.layout(this.gameCam);
 
@@ -2050,6 +2416,9 @@ class RoomScene extends Phaser.Scene {
       if (body) body.setVelocity(0);
       this.stopWalk();
 
+      // Pause main music while Shop is open
+      if (this.gameMusic) this.gameMusic.pauseForOverlay();
+
       // Keep overlay sized to the GBA viewport
       this.shop.layout(this.gameCam);
       this.shop.tick(now, { left, right, up, down, aJust, backJust });
@@ -2065,6 +2434,11 @@ class RoomScene extends Phaser.Scene {
       this.player.setDepth(playerBaseY);
       if (this.worldLayer?.sort) this.worldLayer.sort("depth");
       return;
+    }
+
+    // Resume main music if we were paused by an overlay and nothing is open now.
+    if (this.gameMusic && !this.tvOverlay?.isOpen && !this.shop?.isOpen) {
+      this.gameMusic.resumeAfterOverlay();
     }
 
     const keyJustPressed =
@@ -2084,7 +2458,17 @@ class RoomScene extends Phaser.Scene {
 
     // Dialog freezes movement
     if (this.dialogOpen) {
+      const backJust =
+        (this.keyB && Phaser.Input.Keyboard.JustDown(this.keyB)) ||
+        (this.keyEsc && Phaser.Input.Keyboard.JustDown(this.keyEsc));
       if (keyJustPressed) this.handleA(now);
+      else if (backJust) {
+        if (this.dialogTyping) this.finishTyping();
+        else this.closeDialog();
+        // Clear any held touch directions to prevent post-dialog “sticky” movement
+        this.touch.left = this.touch.right = this.touch.up = this.touch.down = false;
+        this.dpadPointerId = null;
+      }
       freezePlayer();
       return;
     }
