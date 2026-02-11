@@ -228,7 +228,7 @@ class RoomScene extends Phaser.Scene {
   startDoorTransition(toScene, spawn) {
     const now = this.time?.now || Date.now();
     const cooldownMs = this.transitionCooldownMs || 400;
-    if (this.isSceneTransitioning) return;
+    if (this.isSceneTransitioning || this.isTransitioning) return;
     if (this.lastTransitionAt && now - this.lastTransitionAt < cooldownMs) return;
     if (this.dialogOpen || this.shop?.isOpen || this.tvOverlay?.isOpen || this.emailOverlay?.isOpen?.()) return;
 
@@ -241,6 +241,7 @@ class RoomScene extends Phaser.Scene {
     // Root cause: stale/duplicate input listeners surviving scene restarts.
     // Fix: explicit listener teardown + transition lock/cooldown + guarded scene.start().
     this.isSceneTransitioning = true;
+    this.isTransitioning = true;
     this.lastTransitionAt = now;
 
     try {
@@ -251,6 +252,7 @@ class RoomScene extends Phaser.Scene {
       this.scene.start(toScene, { spawn });
     } catch (err) {
       this.isSceneTransitioning = false;
+      this.isTransitioning = false;
       this.showTransitionError(err, toScene);
     }
   }
@@ -377,12 +379,137 @@ class RoomScene extends Phaser.Scene {
     this.emailOverlay = null;
   }
 
+  safeDestroyObject(obj) {
+    try {
+      obj?.destroy?.();
+    } catch {}
+  }
+
+  resetUiObjectRefs() {
+    this.screenBezel = null;
+    this.deckBg = null;
+    this.dpadVisual = null;
+    this.dpadImg = null;
+    this.aVisual = null;
+    this.aImg = null;
+    this.bVisual = null;
+    this.bImg = null;
+    this.dpadHit = null;
+    this.aHit = null;
+    this.bHit = null;
+    this.dialogContainer = null;
+    this.dialogBorder = null;
+    this.dialogFill = null;
+    this.dialogText = null;
+    this.wrapProbeText = null;
+    this.interactProbe = null;
+    this.interactCandidateOutline = null;
+    this.uiBound = false;
+  }
+
+  destroyUiObjects() {
+    this.safeDestroyObject(this.wrapProbeText);
+    this.safeDestroyObject(this.dialogContainer);
+    this.safeDestroyObject(this.dpadVisual);
+    this.safeDestroyObject(this.aVisual);
+    this.safeDestroyObject(this.bVisual);
+    this.safeDestroyObject(this.deckBg);
+    this.safeDestroyObject(this.dpadHit);
+    this.safeDestroyObject(this.aHit);
+    this.safeDestroyObject(this.bHit);
+    this.safeDestroyObject(this.screenBezel);
+    this.safeDestroyObject(this.interactProbe);
+    this.safeDestroyObject(this.interactCandidateOutline);
+    this.safeDestroyObject(this.transitionErrorUi?.container);
+    this.transitionErrorUi = null;
+    this.resetUiObjectRefs();
+  }
+
+  isValidDisplayObject(obj) {
+    return !!(obj && obj.scene && obj.active !== false);
+  }
+
+  isValidShape(obj) {
+    return this.isValidDisplayObject(obj) && !!obj.geom;
+  }
+
+  buildDialogUi() {
+    if (!this.uiLayer || this.isShuttingDown) return;
+    this.destroyDialogUi();
+    this.dialogContainer = this.add.container(0, 0);
+    this.dialogBorder = this.add.rectangle(0, 0, 10, 10, 0x111111).setOrigin(0, 0);
+    this.dialogFill = this.add.rectangle(0, 0, 10, 10, 0xffffff).setOrigin(0, 0);
+    this.dialogText = this.add.text(0, 0, "", {
+      fontFamily: "monospace",
+      fontSize: "14px",
+      color: "#111111",
+      lineSpacing: 2,
+      wordWrap: { width: 100 },
+    });
+    this.dialogContainer.add([this.dialogBorder, this.dialogFill, this.dialogText]);
+    this.dialogContainer.setVisible(false);
+    this.uiLayer.add(this.dialogContainer);
+  }
+
+  destroyDialogUi() {
+    this.safeDestroyObject(this.wrapProbeText);
+    this.wrapProbeText = null;
+    this.safeDestroyObject(this.dialogContainer);
+    this.dialogContainer = null;
+    this.dialogBorder = null;
+    this.dialogFill = null;
+    this.dialogText = null;
+  }
+
+  ensureDialogUiAlive() {
+    if (
+      this.isValidDisplayObject(this.dialogContainer) &&
+      this.isValidShape(this.dialogBorder) &&
+      this.isValidShape(this.dialogFill) &&
+      this.isValidDisplayObject(this.dialogText)
+    ) {
+      return true;
+    }
+
+    // Crash repro (desktop + mobile inspector):
+    // Uncaught TypeError: can't access property "setSize", this.geom is null
+    // setSize phaser.js:79338 -> layout RoomScene.js:1223 -> createControls RoomScene.js:1138 -> create RoomScene.js:512
+    // Root cause: stale Rectangle refs from a previous scene instance became destroyed before layout.
+    this.buildDialogUi();
+    return (
+      this.isValidDisplayObject(this.dialogContainer) &&
+      this.isValidShape(this.dialogBorder) &&
+      this.isValidShape(this.dialogFill) &&
+      this.isValidDisplayObject(this.dialogText)
+    );
+  }
+
+  ensureControlHitArea(refName, radius) {
+    let shape = this[refName];
+    if (!this.isValidShape(shape)) {
+      this.safeDestroyObject(shape);
+      if (!this.uiLayer || this.isShuttingDown) return null;
+      shape = this.add.circle(0, 0, radius, 0x000000, 0.001);
+      this.uiLayer.add(shape);
+      this[refName] = shape;
+    }
+    return shape;
+  }
+
   cleanupScene() {
+    this.isShuttingDown = true;
+    this.isSceneTransitioning = false;
+    this.isTransitioning = false;
     this.detachLifecycleListeners();
     this.detachControlInputListeners();
     this.resetInputState();
     this.clearRunHoldTimer();
     this.destroySystems();
+    this.destroyUiObjects();
+    if (this.layoutSettleTimer) {
+      this.layoutSettleTimer.remove(false);
+      this.layoutSettleTimer = null;
+    }
     if (this.trophyPollTimer) {
       this.trophyPollTimer.remove(false);
       this.trophyPollTimer = null;
@@ -390,11 +517,15 @@ class RoomScene extends Phaser.Scene {
   }
 
   create() {
+    this.isShuttingDown = false;
     this.isSceneTransitioning = false;
+    this.isTransitioning = false;
     this.lastTransitionAt = 0;
     this.transitionCooldownMs = 400;
     this.transitionFailed = false;
     this.transitionErrorUi = null;
+    this.layoutSettleTimer = null;
+    this.resetUiObjectRefs();
     this.worldLayer = this.add.container(0, 0);
     this.uiLayer = this.add.container(0, 0);
     this.remoteState = new RemoteState();
@@ -509,6 +640,7 @@ class RoomScene extends Phaser.Scene {
       this.worldLayer.add(this.interactCandidateOutline);
     }
 
+    this.buildDialogUi();
     this.createControls();
     this.layout();
 
@@ -569,24 +701,11 @@ class RoomScene extends Phaser.Scene {
     this.dialogSlideOffsetY = 0;
     this.typeDelayMs = 32;
     this.wrapProbeText = null;
-    this.dialogContainer = this.add.container(0, 0);
-    this.dialogBorder = this.add.rectangle(0, 0, 10, 10, 0x111111).setOrigin(0, 0);
-    this.dialogFill = this.add.rectangle(0, 0, 10, 10, 0xffffff).setOrigin(0, 0);
-    this.dialogText = this.add.text(0, 0, "", {
-      fontFamily: "monospace",
-      fontSize: "14px",
-      color: "#111111",
-      lineSpacing: 2,
-      wordWrap: { width: 100 },
-    });
-    this.dialogContainer.add([this.dialogBorder, this.dialogFill, this.dialogText]);
-    this.dialogContainer.setVisible(false);
-    this.uiLayer.add(this.dialogContainer);
 
     this.ensurePlayerAnims();
     this.setFacing(this.facing);
     this.layout();
-    this.time.delayedCall(120, () => this.layout());
+    this.layoutSettleTimer = this.time.delayedCall(120, () => this.layout());
 
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.cleanupScene();
@@ -1159,26 +1278,32 @@ class RoomScene extends Phaser.Scene {
   }
 
   applyControlMetrics(metrics) {
+    if (this.isShuttingDown) return;
     this.uiMetrics = metrics;
-    if (this.dpadImg && this.dpadImg.width > 0) {
+    if (this.isValidDisplayObject(this.dpadImg) && this.dpadImg.width > 0) {
       const desired = Math.round(metrics.dpadRadius * 2);
       this.dpadImg.setScale(desired / this.dpadImg.width);
     }
-    if (this.aImg && this.aImg.width > 0) {
+    if (this.isValidDisplayObject(this.aImg) && this.aImg.width > 0) {
       const desired = Math.round(metrics.aVisualRadius * 2);
       this.aImg.setScale(desired / this.aImg.width);
     }
-    if (this.bImg && this.bImg.width > 0) {
+    if (this.isValidDisplayObject(this.bImg) && this.bImg.width > 0) {
       const desired = Math.round(metrics.bVisualRadius * 2);
       this.bImg.setScale(desired / this.bImg.width);
     }
 
-    if (this.dpadHit) this.dpadHit.setRadius(metrics.dpadRadius);
-    if (this.aHit) this.aHit.setRadius(metrics.aHitRadius);
-    if (this.bHit) this.bHit.setRadius(metrics.bHitRadius);
+    const dpad = this.ensureControlHitArea("dpadHit", metrics.dpadRadius);
+    const a = this.ensureControlHitArea("aHit", metrics.aHitRadius);
+    const b = this.ensureControlHitArea("bHit", metrics.bHitRadius);
+    if (this.isValidShape(dpad)) dpad.setRadius(metrics.dpadRadius);
+    if (this.isValidShape(a)) a.setRadius(metrics.aHitRadius);
+    if (this.isValidShape(b)) b.setRadius(metrics.bHitRadius);
   }
 
   layout() {
+    if (this.isShuttingDown) return;
+    if (!this.scale || !this.gameCam || !this.uiCam) return;
     const canvasW = this.scale.width;
     const canvasH = this.scale.height;
 
@@ -1196,22 +1321,28 @@ class RoomScene extends Phaser.Scene {
     const vpX = Math.max(0, Math.floor((canvasW - vpW) / 2));
     const vpY = Math.max(0, Math.floor((deckTop - vpH) / 2));
 
-    this.gameCam.setViewport(vpX, vpY, vpW, vpH);
-    this.gameCam.setScroll(0, 0);
-    this.uiCam.setViewport(0, 0, canvasW, canvasH);
+    if (this.isValidDisplayObject(this.gameCam)) {
+      this.gameCam.setViewport(vpX, vpY, vpW, vpH);
+      this.gameCam.setScroll(0, 0);
+    }
+    if (this.isValidDisplayObject(this.uiCam)) {
+      this.uiCam.setViewport(0, 0, canvasW, canvasH);
+    }
 
-    if (this.screenBezel) {
+    if (this.isValidDisplayObject(this.screenBezel)) {
       const scaleFactor = this.gameCam.width / 320;
       const bezelW = Math.round(352 * scaleFactor);
       const bezelH = Math.round(272 * scaleFactor);
       const bezelX = Math.round(this.gameCam.x - 16 * scaleFactor);
       const bezelY = Math.round(this.gameCam.y - 16 * scaleFactor);
       this.screenBezel.setPosition(bezelX, bezelY);
-      this.screenBezel.setDisplaySize(bezelW, bezelH);
+      if (typeof this.screenBezel.setDisplaySize === "function") {
+        this.screenBezel.setDisplaySize(bezelW, bezelH);
+      }
       this.screenBezel.setScrollFactor(0);
     }
 
-    if (this.dialogContainer && this.dialogBorder && this.dialogFill && this.dialogText) {
+    if (this.ensureDialogUiAlive()) {
       const margin = 8;
       const border = 4;
       const pad = 6;
@@ -1219,22 +1350,28 @@ class RoomScene extends Phaser.Scene {
       const boxH = Math.round(vpH * 0.27);
       const boxX = Math.round(vpX + (vpW - boxW) / 2);
       const boxY = Math.round(vpY + vpH - boxH - margin);
-      this.dialogBorder.setPosition(boxX, boxY);
-      this.dialogBorder.setSize(boxW, boxH);
-      this.dialogFill.setPosition(boxX + border, boxY + border);
-      this.dialogFill.setSize(
-        Math.max(4, boxW - border * 2),
-        Math.max(4, boxH - border * 2)
-      );
+      if (this.isValidShape(this.dialogBorder)) {
+        this.dialogBorder.setPosition(boxX, boxY);
+        this.dialogBorder.setSize(boxW, boxH);
+      }
+      if (this.isValidShape(this.dialogFill)) {
+        this.dialogFill.setPosition(boxX + border, boxY + border);
+        this.dialogFill.setSize(
+          Math.max(4, boxW - border * 2),
+          Math.max(4, boxH - border * 2)
+        );
+      }
       const textX = boxX + border + pad;
       const textY = boxY + border + pad + 1;
       const textW = Math.max(4, boxW - 2 * (border + pad));
-      this.dialogText.setPosition(textX, textY);
-      this.dialogText.setWordWrapWidth(textW);
+      if (this.isValidDisplayObject(this.dialogText)) {
+        this.dialogText.setPosition(textX, textY);
+        this.dialogText.setWordWrapWidth(textW);
+      }
       this.dialogSlideOffsetY = Math.max(0, vpY + vpH - boxY + 4);
     }
 
-    if (this.deckBg) {
+    if (this.isValidDisplayObject(this.deckBg) && typeof this.deckBg.setDisplaySize === "function") {
       this.deckBg.setPosition(0, deckTop);
       this.deckBg.setDisplaySize(canvasW, deckHeight);
     }
@@ -1291,12 +1428,12 @@ class RoomScene extends Phaser.Scene {
       )
     );
 
-    if (this.dpadVisual) this.dpadVisual.setPosition(dpadX, dpadY);
-    if (this.aVisual) this.aVisual.setPosition(aX, aY);
-    if (this.bVisual) this.bVisual.setPosition(bX, bY);
-    if (this.dpadHit) this.dpadHit.setPosition(dpadX, dpadY);
-    if (this.aHit) this.aHit.setPosition(aX, aY);
-    if (this.bHit) this.bHit.setPosition(bX, bY);
+    if (this.isValidDisplayObject(this.dpadVisual)) this.dpadVisual.setPosition(dpadX, dpadY);
+    if (this.isValidDisplayObject(this.aVisual)) this.aVisual.setPosition(aX, aY);
+    if (this.isValidDisplayObject(this.bVisual)) this.bVisual.setPosition(bX, bY);
+    if (this.isValidShape(this.dpadHit)) this.dpadHit.setPosition(dpadX, dpadY);
+    if (this.isValidShape(this.aHit)) this.aHit.setPosition(aX, aY);
+    if (this.isValidShape(this.bHit)) this.bHit.setPosition(bX, bY);
 
     if (this.shop) this.shop.layout(this.gameCam);
     if (this.tvOverlay) this.tvOverlay.layout(this.gameCam);
