@@ -20,6 +20,7 @@ import ComputerShop from "../systems/ComputerShop";
 import TVOverlay from "../systems/TVOverlay";
 import RemoteState from "../systems/RemoteState";
 import EmailCaptureOverlay from "../ui/EmailCaptureOverlay";
+import ArcadeOverlay from "../arcade/ArcadeOverlay";
 class RoomScene extends Phaser.Scene {
   constructor({ key = "room", variant = "room" } = {}) {
     super(key);
@@ -55,6 +56,7 @@ class RoomScene extends Phaser.Scene {
     this.load.image("studer_controller", "/assets/room/studer_controller.png");
     this.load.image("couch", "/assets/room/couch.png");
     this.load.image("tv", "/assets/room/tv.png");
+    this.load.image("arcade", "/assets/room/arcade.png");
     this.load.image("ui_dpad", "/assets/ui/dpad.png");
     this.load.image("ui_a", "/assets/ui/abutton.png");
     this.load.image("ui_b", "/assets/ui/bbutton.png");
@@ -81,7 +83,7 @@ class RoomScene extends Phaser.Scene {
 
   getPurchasableBeatItems() {
     const shopData = this.cache.json.get("shop_data") || {};
-    const pageSize = Number.isFinite(shopData?.pageSize) ? shopData.pageSize : 6;
+    const pageSize = Number.isFinite(shopData?.pageSize) ? shopData.pageSize : 5;
     const items = normalizeShopItems(shopData?.items || [], pageSize);
     return items.filter((item) => !this.isCoffeeItem(item));
   }
@@ -132,11 +134,142 @@ class RoomScene extends Phaser.Scene {
     this.dpadPointerId = null;
     this.aPointerId = null;
     this.bPointerId = null;
+    this.dpadLockDir = null;
+    this.dpadDesiredDir = null;
+    this.dpadMoveEnabledAt = 0;
+    this.arcadeTouchAJust = false;
+    this.arcadeTouchBJust = false;
     this.clearRunHoldTimer();
 
     const body = this.player?.body;
     if (body?.setVelocity) body.setVelocity(0);
     if (this.player?.anims) this.stopWalk();
+  }
+
+  clearTouchMoveFlags() {
+    if (!this.touch) return;
+    this.touch.left = false;
+    this.touch.right = false;
+    this.touch.up = false;
+    this.touch.down = false;
+  }
+
+  setDpadTouchDirection(dir, now) {
+    const hasDir = typeof dir === "string" && dir.length > 0;
+    this.dpadLockDir = hasDir ? dir : null;
+    this.dpadDesiredDir = hasDir ? dir : null;
+
+    if (!hasDir) {
+      this.dpadMoveEnabledAt = 0;
+      this.clearTouchMoveFlags();
+      return;
+    }
+
+    this.lastPressedTime[dir] = this.inputTick;
+    const inWorldMovementMode =
+      !this.dialogOpen &&
+      !this.shop?.isOpen &&
+      !this.tvOverlay?.isOpen &&
+      !this.arcadeOverlay?.isOpen &&
+      !this.uiModalOpen &&
+      !this.arcadeOpenPending;
+    const body = this.player?.body;
+    const isMovingNow =
+      !!this.touch.left ||
+      !!this.touch.right ||
+      !!this.touch.up ||
+      !!this.touch.down ||
+      !!(body && body.velocity && body.velocity.lengthSq() > 1);
+
+    if (inWorldMovementMode && dir !== this.facing) {
+      this.setFacing(dir);
+      if (!isMovingNow) {
+        const skipTurnHoldOnStartup =
+          Number.isFinite(this._startupNoTurnHoldUntil) && now < this._startupNoTurnHoldUntil;
+        const useTurnHold = !this._isCoarsePointer;
+        if (!skipTurnHoldOnStartup && useTurnHold) {
+          // Pokemon-style turn-in-place only when starting from idle.
+          this.stopWalk();
+          this.clearTouchMoveFlags();
+          this.dpadMoveEnabledAt = now + this.turnHoldMs;
+          return;
+        }
+      }
+    }
+
+    this.dpadMoveEnabledAt = now;
+    this.applyDpadTouchMovement(now);
+  }
+
+  applyDpadTouchMovement(now) {
+    const dir = this.dpadDesiredDir;
+    if (!dir || now < this.dpadMoveEnabledAt) {
+      this.clearTouchMoveFlags();
+      return;
+    }
+
+    this.touch.left = dir === "left";
+    this.touch.right = dir === "right";
+    this.touch.up = dir === "up";
+    this.touch.down = dir === "down";
+  }
+
+  tryPlayArcadeInteractSfx() {
+    const sound = this.sound;
+    if (!sound) return;
+    const candidates = ["ui_blip", "ui_click", "click", "confirm", "sfx_ui"];
+    for (let i = 0; i < candidates.length; i += 1) {
+      const key = candidates[i];
+      const loaded = !!sound.get?.(key) || !!this.cache?.audio?.exists?.(key);
+      if (!loaded) continue;
+      try {
+        sound.play(key, { volume: 0.45 });
+      } catch {}
+      return;
+    }
+  }
+
+  clearArcadeHumMessage() {
+    if (this.arcadeHumMessageUi) {
+      this.safeDestroyObject(this.arcadeHumMessageUi);
+      this.arcadeHumMessageUi = null;
+    }
+  }
+
+  showArcadeHumMessage() {
+    this.clearArcadeHumMessage();
+
+    const cam = this.gameCam;
+    const vpX = Math.round(cam?.x || 0);
+    const vpY = Math.round(cam?.y || 0);
+    const vpW = Math.round(cam?.width || this.scale?.width || 0);
+    const vpH = Math.round(cam?.height || this.scale?.height || 0);
+
+    const boxW = Math.max(120, Math.min(232, vpW - 12));
+    const boxH = 22;
+    const boxX = Math.round(vpX + (vpW - boxW) / 2);
+    const boxY = Math.round(vpY + vpH - boxH - 6);
+
+    const container = this.add.container(0, 0).setDepth(15000);
+    const border = this.add.rectangle(boxX, boxY, boxW, boxH, 0x111111, 1).setOrigin(0, 0);
+    const fill = this.add.rectangle(boxX + 2, boxY + 2, boxW - 4, boxH - 4, 0xffffff, 1).setOrigin(0, 0);
+    const text = this.add.text(boxX + 8, boxY + 5, "The arcade hums softly...", {
+      fontFamily: "monospace",
+      fontSize: "11px",
+      color: "#111111",
+    }).setOrigin(0, 0);
+    container.add([border, fill, text]);
+    this.uiLayer.add(container);
+    this.arcadeHumMessageUi = container;
+  }
+
+  cancelPendingArcadeOpen() {
+    this.arcadeOpenPending = false;
+    if (this.arcadeOpenTimer) {
+      this.arcadeOpenTimer.remove(false);
+      this.arcadeOpenTimer = null;
+    }
+    this.clearArcadeHumMessage();
   }
 
   freezePlayer() {
@@ -148,7 +281,149 @@ class RoomScene extends Phaser.Scene {
     this.stopWalk();
     const playerBaseY = this.player.body ? this.player.body.bottom : this.player.y;
     this.player.setDepth(playerBaseY);
+    if (this.isTrophyRoom()) this.syncTrophyPillarDepths(playerBaseY);
     if (this.worldLayer?.sort) this.worldLayer.sort("depth");
+  }
+
+  syncTrophyPillarDepths(playerDepth) {
+    if (!this.isTrophyRoom() || !Array.isArray(this.trophyPillars)) return;
+    const resolvedPlayerDepth =
+      Number.isFinite(playerDepth) ? playerDepth : this.player?.body?.bottom ?? this.player?.getBottomCenter?.().y;
+
+    // Classic Pokemon-style layering: compare player feet Y vs pillar base anchor Y.
+    if (Number.isFinite(resolvedPlayerDepth)) {
+      this.player.setDepth(resolvedPlayerDepth);
+    }
+
+    for (let i = 0; i < this.trophyPillars.length; i += 1) {
+      const pillar = this.trophyPillars[i];
+      const anchorY =
+        pillar?.depthAnchorY ??
+        pillar?.blocker?.getBottomCenter?.().y ??
+        pillar?.shaft?.getBottomCenter?.().y ??
+        pillar?.shaft?.y ??
+        0;
+
+      pillar.depthAnchorY = anchorY;
+      if (pillar?.visual?.setDepth) {
+        pillar.visual.setDepth(anchorY + 0.01);
+      } else {
+        pillar.shaft?.setDepth?.(anchorY);
+        pillar.cap?.setDepth?.(anchorY + 0.01);
+        pillar.accent?.setDepth?.(anchorY + 0.02);
+      }
+      pillar.blocker?.setDepth?.(anchorY);
+      if (pillar.trophy?.visible) pillar.trophy.setDepth(anchorY + 0.03);
+    }
+  }
+
+  getTrophyRoomInnerBounds() {
+    const bounds = this.physics?.world?.bounds;
+    const worldX = Number.isFinite(bounds?.x) ? bounds.x : 0;
+    const worldY = Number.isFinite(bounds?.y) ? bounds.y : 0;
+    const worldW = Number.isFinite(bounds?.width) ? bounds.width : GAME_W;
+    const worldH = Number.isFinite(bounds?.height) ? bounds.height : GAME_H;
+    const wallThickness = 14;
+
+    return {
+      innerLeft: Math.round(worldX + wallThickness),
+      innerRight: Math.round(worldX + worldW - wallThickness),
+      innerTop: Math.round(worldY + wallThickness),
+      innerBottom: Math.round(worldY + worldH - wallThickness),
+      wallThickness,
+    };
+  }
+
+  getTrophyPedestalSlots(count) {
+    const total = Math.max(0, Math.floor(Number(count) || 0));
+    if (total <= 0) return [];
+
+    const cols = 4;
+    const rows = Math.max(1, Math.ceil(total / cols));
+    const { innerLeft, innerRight, innerTop, innerBottom } = this.getTrophyRoomInnerBounds();
+
+    const centerX = Math.round((innerLeft + innerRight) / 2);
+    const aisleWidth = 42;
+    const columnGap = 30;
+    const nearAisleOffset = Math.round(aisleWidth / 2) + 8;
+    const farAisleOffset = nearAisleOffset + columnGap;
+
+    const minX = innerLeft + 24;
+    const maxX = innerRight - 24;
+    const columns = [
+      Phaser.Math.Clamp(centerX - farAisleOffset, minX, maxX),
+      Phaser.Math.Clamp(centerX - nearAisleOffset, minX, maxX),
+      Phaser.Math.Clamp(centerX + nearAisleOffset, minX, maxX),
+      Phaser.Math.Clamp(centerX + farAisleOffset, minX, maxX),
+    ];
+
+    const rowTop = innerTop + 48;
+    const rowBottom = innerBottom - 12;
+    const rowYs = this.distributeEvenly(rows, rowTop, rowBottom, 0);
+
+    const slots = [];
+    for (let r = 0; r < rows; r += 1) {
+      for (let c = 0; c < cols; c += 1) {
+        slots.push({ x: columns[c], y: rowYs[r] });
+        if (slots.length >= total) return slots;
+      }
+    }
+    return slots;
+  }
+
+  distributeEvenly(count, start, end, edgePadding = 0) {
+    if (!Number.isFinite(count) || count <= 0) return [];
+    const min = Math.min(start, end);
+    const max = Math.max(start, end);
+    const s = min + Math.max(0, edgePadding);
+    const e = max - Math.max(0, edgePadding);
+    if (count === 1 || e <= s) return [Math.round((s + e) / 2)];
+
+    const step = (e - s) / (count - 1);
+    const out = [];
+    for (let i = 0; i < count; i += 1) {
+      out.push(Math.round(s + step * i));
+    }
+    return out;
+  }
+
+  allocateCountsByLength(total, lengths, minEach = 0) {
+    const keys = Object.keys(lengths || {});
+    const counts = {};
+    keys.forEach((key) => {
+      counts[key] = 0;
+    });
+    if (!Number.isFinite(total) || total <= 0 || keys.length === 0) return counts;
+
+    const safeMin = total >= keys.length * minEach ? minEach : 0;
+    keys.forEach((key) => {
+      counts[key] = safeMin;
+    });
+
+    let remaining = total - safeMin * keys.length;
+    if (remaining <= 0) return counts;
+
+    const safeLengths = keys.map((key) => ({
+      key,
+      len: Math.max(0, Number(lengths[key]) || 0),
+    }));
+    const sumLen = safeLengths.reduce((sum, item) => sum + item.len, 0);
+    const useEvenWeights = sumLen <= 0;
+
+    const fractional = safeLengths.map((item) => {
+      const weight = useEvenWeights ? 1 : item.len;
+      const raw = useEvenWeights ? remaining / keys.length : (remaining * weight) / sumLen;
+      const base = Math.floor(raw);
+      counts[item.key] += base;
+      return { key: item.key, frac: raw - base };
+    });
+
+    remaining = total - keys.reduce((sum, key) => sum + counts[key], 0);
+    fractional.sort((a, b) => b.frac - a.frac);
+    for (let i = 0; i < remaining; i += 1) {
+      counts[fractional[i % fractional.length].key] += 1;
+    }
+    return counts;
   }
 
   addInteractable({ id, sprite, text, getInteractRect, meta }) {
@@ -230,7 +505,16 @@ class RoomScene extends Phaser.Scene {
     const cooldownMs = this.transitionCooldownMs || 400;
     if (this.isSceneTransitioning || this.isTransitioning) return;
     if (this.lastTransitionAt && now - this.lastTransitionAt < cooldownMs) return;
-    if (this.dialogOpen || this.shop?.isOpen || this.tvOverlay?.isOpen || this.emailOverlay?.isOpen?.()) return;
+    if (
+      this.dialogOpen ||
+      this.shop?.isOpen ||
+      this.tvOverlay?.isOpen ||
+      this.arcadeOverlay?.isOpen ||
+      this.arcadeOpenPending ||
+      this.uiModalOpen
+    ) {
+      return;
+    }
 
     // Desktop repro stack captured while returning Trophy -> Room:
     // TypeError: Cannot read properties of undefined (reading 'radius')
@@ -246,8 +530,10 @@ class RoomScene extends Phaser.Scene {
 
     try {
       this.resetInputState();
+      this.cancelPendingArcadeOpen();
       this.shop?.close?.();
       this.tvOverlay?.close?.();
+      this.arcadeOverlay?.close?.();
       if (this.emailOverlay?.isOpen?.()) this.emailOverlay.close();
       this.scene.start(toScene, { spawn });
     } catch (err) {
@@ -339,6 +625,8 @@ class RoomScene extends Phaser.Scene {
     window.visualViewport?.addEventListener("scroll", this._onVisualViewportScroll);
 
     this._onMusicGesture = () => {
+      if (this.uiModalOpen) return;
+      this._warmupHasUserGesture = true;
       if (this.gameMusic) this.gameMusic.startFromGesture();
     };
     this.input.on("pointerdown", this._onMusicGesture);
@@ -373,10 +661,12 @@ class RoomScene extends Phaser.Scene {
     this.tvOverlay?.destroy?.();
     this.gameMusic?.destroy?.();
     this.emailOverlay?.destroy?.();
+    this.arcadeOverlay?.destroy?.();
     this.shop = null;
     this.tvOverlay = null;
     this.gameMusic = null;
     this.emailOverlay = null;
+    this.arcadeOverlay = null;
   }
 
   safeDestroyObject(obj) {
@@ -404,6 +694,12 @@ class RoomScene extends Phaser.Scene {
     this.wrapProbeText = null;
     this.interactProbe = null;
     this.interactCandidateOutline = null;
+    this._perfHudText = null;
+    this._perfHudStart = 0;
+    this._perfHudMaxDt = 0;
+    this._perfHudHitches = 0;
+    this._perfHudLayoutCount = 0;
+    this._perfHudActive = false;
     this.uiBound = false;
   }
 
@@ -420,6 +716,7 @@ class RoomScene extends Phaser.Scene {
     this.safeDestroyObject(this.screenBezel);
     this.safeDestroyObject(this.interactProbe);
     this.safeDestroyObject(this.interactCandidateOutline);
+    this.safeDestroyObject(this._perfHudText);
     this.safeDestroyObject(this.transitionErrorUi?.container);
     this.transitionErrorUi = null;
     this.resetUiObjectRefs();
@@ -500,6 +797,9 @@ class RoomScene extends Phaser.Scene {
     this.isShuttingDown = true;
     this.isSceneTransitioning = false;
     this.isTransitioning = false;
+    this.uiModalOpen = false;
+    this.cancelPendingArcadeOpen();
+    this.setModalKeyboardCapture(false);
     this.detachLifecycleListeners();
     this.detachControlInputListeners();
     this.resetInputState();
@@ -532,8 +832,21 @@ class RoomScene extends Phaser.Scene {
     this.localIdentity = this.readLocalIdentity();
     this.identitySubmitted = !!(this.localIdentity?.name && this.localIdentity?.email);
     this.shopOpenedAt = 0;
-    this.shopEmailPromptShown = false;
+    this.emailPromptSnoozedThisSession = false;
     this.emailOverlayWasOpen = false;
+    this.uiModalOpen = false;
+    this.arcadeTouchAJust = false;
+    this.arcadeTouchBJust = false;
+    this.arcadeOpenPending = false;
+    this.arcadeOpenTimer = null;
+    this.arcadeHumMessageUi = null;
+    this._isCoarsePointer =
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(pointer: coarse)").matches;
+    this._bootWarmupRemainingMs = 0;
+    this._bootWarmupDidPrewarm = false;
+    this._startupNoTurnHoldUntil = this.time.now + 1200;
 
     const floor = this.add.tileSprite(0, 0, GAME_W, GAME_H, "floor").setOrigin(0, 0);
     floor.setDepth(0);
@@ -573,6 +886,7 @@ class RoomScene extends Phaser.Scene {
     this.keyShift = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SHIFT);
     this.keyB = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.B);
     this.keyEsc = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.ESC);
+    this.keyboardPreventDefaultBeforeModal = this.input?.keyboard?.preventDefault ?? true;
     this.input.addPointer(3);
     try {
       const c = this.game?.canvas;
@@ -584,6 +898,10 @@ class RoomScene extends Phaser.Scene {
     this.inputTick = 0;
     this.pendingInteractUntil = 0;
     this.uiBound = false;
+    this.turnHoldMs = 110;
+    this.dpadLockDir = null;
+    this.dpadDesiredDir = null;
+    this.dpadMoveEnabledAt = 0;
     this.runHeld = false;
     this.aIsDown = false;
     this.aDownAt = 0;
@@ -593,6 +911,8 @@ class RoomScene extends Phaser.Scene {
 
     this.gameCam = this.cameras.main;
     this.uiCam = this.cameras.add(0, 0, this.scale.width, this.scale.height);
+    this.gameCam.roundPixels = true;
+    this.uiCam.roundPixels = true;
     this.gameCam.ignore(this.uiLayer);
     this.uiCam.ignore(this.worldLayer);
     this.uiLayer.setDepth(1000);
@@ -641,8 +961,38 @@ class RoomScene extends Phaser.Scene {
     }
 
     this.buildDialogUi();
+    // Optional perf HUD (DEBUG only)
+    if (DEBUG_UI) {
+      this._perfHudStart = this.time.now;
+      this._perfHudMaxDt = 0;
+      this._perfHudHitches = 0;
+      this._perfHudLayoutCount = 0;
+      this._perfHudActive = true;
+      this._perfHudText = this.add.text(10, 10, "", {
+        fontFamily: "monospace",
+        fontSize: "11px",
+        color: "#9cff9c",
+        backgroundColor: "rgba(0,0,0,0.65)",
+        padding: { x: 4, y: 3 },
+      });
+      this._perfHudText.setOrigin(0, 0);
+      this._perfHudText.setScrollFactor(0);
+      this._perfHudText.setDepth(50000);
+      this.uiLayer.add(this._perfHudText);
+    } else {
+      this._perfHudStart = 0;
+      this._perfHudMaxDt = 0;
+      this._perfHudHitches = 0;
+      this._perfHudLayoutCount = 0;
+      this._perfHudActive = false;
+      this._perfHudText = null;
+    }
     this.createControls();
     this.layout();
+    this._warmupNeedsInputReset = true;
+    this._warmupHasUserGesture = false;
+    this.time.delayedCall(0, () => {});
+    this.time.delayedCall(50, () => {});
 
     if (this.isMainRoom()) {
       this.shop = new ComputerShop(this);
@@ -656,6 +1006,16 @@ class RoomScene extends Phaser.Scene {
       this.loadTvVideos();
 
       this.emailOverlay = new EmailCaptureOverlay({
+        onOpen: () => {
+          this.uiModalOpen = true;
+          this.setModalKeyboardCapture(true);
+          this.resetInputState();
+        },
+        onClose: () => {
+          this.uiModalOpen = false;
+          this.setModalKeyboardCapture(false);
+          this.resetInputState();
+        },
         onSubmit: async ({ name, email }) => {
           const registered = await this.remoteState.registerIdentity(name, email);
           this.localIdentity = {
@@ -665,12 +1025,24 @@ class RoomScene extends Phaser.Scene {
           };
           this.identitySubmitted = !!(this.localIdentity.name && this.localIdentity.email);
           this.saveLocalIdentity(this.localIdentity);
+          this.emailPromptSnoozedThisSession = true;
           this.resetInputState();
         },
         onCancel: () => {
+          this.dismissEmailPromptForShopSession();
+        },
+      });
+
+      this.arcadeOverlay = new ArcadeOverlay(this, {
+        onOpen: () => {
+          this.resetInputState();
+        },
+        onClose: () => {
           this.resetInputState();
         },
       });
+      this.uiLayer.add(this.arcadeOverlay.container);
+      this.arcadeOverlay.layout(this.gameCam);
 
       this.gameMusic = new GameMusic(this);
       this.gameMusic.load().then(() => {
@@ -681,6 +1053,7 @@ class RoomScene extends Phaser.Scene {
       this.tvOverlay = null;
       this.gameMusic = null;
       this.emailOverlay = null;
+      this.arcadeOverlay = null;
       this.trophyPollTimer = this.time.addEvent({
         delay: 10000,
         loop: true,
@@ -703,6 +1076,17 @@ class RoomScene extends Phaser.Scene {
     this.wrapProbeText = null;
 
     this.ensurePlayerAnims();
+    if (!this._bootWarmupDidPrewarm && this.player?.anims) {
+      const facingBeforePrewarm = this.facing;
+      const prewarmKeys = ["walk_down", "walk_up", "walk_left", "walk_right"];
+      for (let i = 0; i < prewarmKeys.length; i += 1) {
+        this.player.anims.play(prewarmKeys[i], true);
+        this.player.anims.stop();
+      }
+      this.setFacing(facingBeforePrewarm);
+      this.stopWalk();
+      this._bootWarmupDidPrewarm = true;
+    }
     this.setFacing(this.facing);
     this.layout();
     this.layoutSettleTimer = this.time.delayedCall(120, () => this.layout());
@@ -833,6 +1217,42 @@ class RoomScene extends Phaser.Scene {
       this.makeBlocker(tv, 0.9, 12);
     }
 
+    let arcadeMachine = null;
+    if (true) {
+      const arcadeX = Math.round(GAME_W * 0.72);
+      const arcadeY = GAME_H - 9;
+      const arcadeTex = this.textures.exists("arcade") ? this.textures.get("arcade") : null;
+      const hasArcadeTexture =
+        !!arcadeTex &&
+        arcadeTex.key !== "__MISSING" &&
+        !!arcadeTex.getSourceImage &&
+        !!arcadeTex.getSourceImage();
+
+      if (hasArcadeTexture) {
+        arcadeMachine = this.add.image(arcadeX, arcadeY, "arcade").setOrigin(0.5, 1);
+        arcadeMachine.setScale(PROP_SCALE * 1.1);
+        arcadeMachine.setPipeline("TextureTintPipeline");
+        arcadeTex.setFilter(Phaser.Textures.FilterMode.NEAREST);
+        this.worldLayer.add(arcadeMachine);
+        this.makeBlocker(arcadeMachine, 0.85, 10);
+      } else {
+        arcadeMachine = this.add.rectangle(arcadeX, arcadeY, 26, 32, 0x16385a, 1).setOrigin(0.5, 1);
+        const marquee = this.add.rectangle(arcadeX, arcadeY - 30, 20, 5, 0xffe57c, 1).setOrigin(0.5, 0);
+        const screen = this.add.rectangle(arcadeX, arcadeY - 20, 16, 8, 0x6bc9ff, 1).setOrigin(0.5, 0.5);
+        const label = this.add.text(arcadeX, arcadeY - 30, "ARCADE", {
+          fontFamily: "monospace",
+          fontSize: "6px",
+          color: "#111111",
+        }).setOrigin(0.5, 0);
+        this.worldLayer.add([arcadeMachine, marquee, screen, label]);
+        const blocker = this.makeBlocker(arcadeMachine, 0.85, 10);
+        const baseY = blocker.getBottomCenter().y;
+        marquee.setDepth(baseY + 0.01);
+        screen.setDepth(baseY + 0.02);
+        label.setDepth(baseY + 0.03);
+      }
+    }
+
     this.addInteractable({
       id: "pc",
       sprite: pc,
@@ -887,6 +1307,18 @@ class RoomScene extends Phaser.Scene {
       sprite: this.studerController,
       text: "*click* ~a faint whirring sound is coming from the tape machine.~",
     });
+    if (arcadeMachine) {
+      this.addInteractable({
+        id: "arcade",
+        sprite: arcadeMachine,
+        text: "An arcade machine...",
+        getInteractRect: () => {
+          const b = arcadeMachine.getBounds();
+          const pad = 10;
+          return new Phaser.Geom.Rectangle(b.x - pad, b.y - pad, b.width + pad * 2, b.height + pad * 2);
+        },
+      });
+    }
 
     const studioDoor = {
       x: GAME_W - 4,
@@ -904,30 +1336,43 @@ class RoomScene extends Phaser.Scene {
 
   buildTrophyRoomWorld() {
     const beatItems = this.getPurchasableBeatItems();
-    const count = beatItems.length > 0 ? beatItems.length : 24;
+    const count = beatItems.length > 0 ? beatItems.length : 20;
     this.trophyPillars = [];
     this.trophyPurchases = [];
 
-    const cols = Math.max(4, Math.ceil(Math.sqrt(count)));
-    const rows = Math.ceil(count / cols);
-    const minX = 36;
-    const maxX = GAME_W - 24;
-    const minY = 52;
-    const maxY = GAME_H - 26;
-    const xStep = cols > 1 ? (maxX - minX) / (cols - 1) : 0;
-    const yStep = rows > 1 ? (maxY - minY) / (rows - 1) : 0;
+    const trophyDoor = {
+      x: 4,
+      y: Math.round(GAME_H / 2),
+      width: 8,
+      height: 48,
+    };
 
-    for (let i = 0; i < count; i += 1) {
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      const x = Math.round(minX + col * xStep);
-      const y = Math.round(minY + row * yStep);
+    const pillarSlots = this.getTrophyPedestalSlots(count);
+
+    if (DEBUG_UI) {
+      for (let i = 0; i < pillarSlots.length; i += 1) {
+        const dot = this.add.circle(pillarSlots[i].x, pillarSlots[i].y, 2, 0x33e0ff, 0.95);
+        dot.setDepth(12002);
+        this.worldLayer.add(dot);
+      }
+      console.log("[trophy-grid-layout]", {
+        rows: Math.ceil(Math.max(1, count) / 4),
+        columns: 4,
+        countRequested: count,
+        totalSlots: pillarSlots.length,
+      });
+    }
+
+    for (let i = 0; i < pillarSlots.length; i += 1) {
+      const slot = pillarSlots[i];
+      const x = slot.x;
+      const y = slot.y;
 
       const shaft = this.add.rectangle(x, y, 14, 22, 0x8f98a3).setOrigin(0.5, 1);
       const cap = this.add.rectangle(x, y - 20, 20, 5, 0xdce2e8).setOrigin(0.5, 1);
       const accent = this.add.rectangle(x, y - 10, 10, 2, 0xb0beca).setOrigin(0.5, 1);
       this.worldLayer.add([shaft, cap, accent]);
-      this.makeBlocker(shaft, 0.9, 8);
+      const blocker = this.makeBlocker(shaft, 0.9, 8);
 
       const trophy = this.add.container(x, y - 24);
       const cup = this.add.rectangle(0, 0, 10, 7, 0xf2c94c);
@@ -947,15 +1392,19 @@ class RoomScene extends Phaser.Scene {
         meta: { pillarIndex: i },
       });
 
-      this.trophyPillars.push({ shaft, cap, accent, trophy, purchase: null });
+      this.trophyPillars.push({
+        shaft,
+        cap,
+        accent,
+        trophy,
+        purchase: null,
+        depthAnchorY: blocker.getBottomCenter().y,
+        blocker,
+      });
     }
 
-    const trophyDoor = {
-      x: 4,
-      y: Math.round(GAME_H / 2),
-      width: 8,
-      height: 48,
-    };
+    this.syncTrophyPillarDepths();
+
     this.placeDoorRug({ ...trophyDoor, side: "left" });
     this.createDoorZone({
       ...trophyDoor,
@@ -980,7 +1429,7 @@ class RoomScene extends Phaser.Scene {
       pillar.purchase = purchase;
       pillar.trophy.setVisible(!!purchase);
       if (purchase) {
-        pillar.trophy.setDepth(pillar.shaft.getBottomCenter().y + 2);
+        pillar.trophy.setDepth((pillar.depthAnchorY ?? pillar.shaft.getBottomCenter().y) + 0.03);
       }
     }
   }
@@ -1024,9 +1473,21 @@ class RoomScene extends Phaser.Scene {
     this.aPointerId = null;
     this.bPointerId = null;
     const pressBButton = (now) => {
-      if (this.emailOverlay?.isOpen?.()) {
+      if (this.uiModalOpen) {
         this.emailOverlay.close();
         this.resetInputState();
+        return;
+      }
+
+      if (this.arcadeOpenPending) {
+        this.cancelPendingArcadeOpen();
+        this.resetInputState();
+        return;
+      }
+
+      // Arcade: B backs out (game -> menu -> close).
+      if (this.arcadeOverlay?.isOpen) {
+        this.arcadeTouchBJust = true;
         return;
       }
 
@@ -1071,38 +1532,65 @@ class RoomScene extends Phaser.Scene {
       this.clearRunHoldTimer();
     };
 
-    const handleDpadAtPoint = (px, py) => {
-      if (this.dialogOpen || this.emailOverlay?.isOpen?.()) return;
+    const dominantDir = (dx, dy) => {
+      if (Math.abs(dx) > Math.abs(dy)) return dx < 0 ? "left" : "right";
+      return dy < 0 ? "up" : "down";
+    };
 
+    const computeLockedDpadDir = (px, py) => {
       const cx = this.dpadHit.x;
       const cy = this.dpadHit.y;
       const dx = px - cx;
       const dy = py - cy;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      const deadzone = 10;
-
-      if (!Number.isFinite(dist) || dist < deadzone) {
-        this.touch.left = this.touch.right = this.touch.up = this.touch.down = false;
-        return;
-      }
-
       const absdx = Math.abs(dx);
       const absdy = Math.abs(dy);
-      let dir = null;
-      if (absdx > absdy) dir = dx < 0 ? "left" : "right";
-      else dir = dy < 0 ? "up" : "down";
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const deadzoneEnter = this._isCoarsePointer ? 8 : 12;
+      const deadzoneKeep = this._isCoarsePointer ? 6 : 8;
+      const axisThreshold = 8;
+      const switchMargin = 7;
 
-      this.touch.left = dir === "left";
-      this.touch.right = dir === "right";
-      this.touch.up = dir === "up";
-      this.touch.down = dir === "down";
+      if (!Number.isFinite(dist)) return null;
+      if (!this.dpadLockDir) {
+        if (dist < deadzoneEnter) return null;
+        return dominantDir(dx, dy);
+      }
+      if (dist < deadzoneKeep) return this.dpadLockDir;
 
-      this.lastPressedTime[dir] = this.inputTick;
-      if (!this.shop?.isOpen) this.setFacing(dir);
+      if (this.dpadLockDir === "left" || this.dpadLockDir === "right") {
+        if (absdy > absdx + switchMargin) return dy < 0 ? "up" : "down";
+        if (dx <= -axisThreshold) return "left";
+        if (dx >= axisThreshold) return "right";
+        return this.dpadLockDir;
+      }
+      if (absdx > absdy + switchMargin) return dx < 0 ? "left" : "right";
+      if (dy <= -axisThreshold) return "up";
+      if (dy >= axisThreshold) return "down";
+      return this.dpadLockDir;
+    };
+
+    const handleDpadAtPoint = (px, py, now) => {
+      if (this.dialogOpen || this.uiModalOpen) return;
+      const nextDir = computeLockedDpadDir(px, py);
+      if (!nextDir) {
+        this.setDpadTouchDirection(null, now);
+        return;
+      }
+      if (nextDir !== this.dpadLockDir) {
+        this.setDpadTouchDirection(nextDir, now);
+        return;
+      }
+      this.applyDpadTouchMovement(now);
     };
 
     const startAButton = (now) => {
-      if (this.emailOverlay?.isOpen?.()) return;
+      if (this.uiModalOpen) return;
+
+      // Arcade: A action/select.
+      if (this.arcadeOverlay?.isOpen) {
+        this.arcadeTouchAJust = true;
+        return;
+      }
 
       // If an overlay is open, A behaves as action (not run).
       if (this.tvOverlay?.isOpen) {
@@ -1134,7 +1622,7 @@ class RoomScene extends Phaser.Scene {
           !this.dialogOpen &&
           !this.shop?.isOpen &&
           !this.tvOverlay?.isOpen &&
-          !this.emailOverlay?.isOpen?.()
+          !this.uiModalOpen
         ) {
           this.runHeld = true;
         }
@@ -1156,7 +1644,7 @@ class RoomScene extends Phaser.Scene {
         !this.dialogOpen &&
         !this.shop?.isOpen &&
         !this.tvOverlay?.isOpen &&
-        !this.emailOverlay?.isOpen?.()
+        !this.uiModalOpen
       ) {
         this.handleA(now);
       }
@@ -1164,7 +1652,7 @@ class RoomScene extends Phaser.Scene {
 
     const clearDpad = () => {
       this.dpadPointerId = null;
-      this.touch.left = this.touch.right = this.touch.up = this.touch.down = false;
+      this.setDpadTouchDirection(null, this.time.now);
     };
 
     const clearA = () => {
@@ -1178,10 +1666,10 @@ class RoomScene extends Phaser.Scene {
 
     this._onControlPointerDown = (pointer) => {
       if (this.transitionFailed) return;
+      if (this.uiModalOpen) return;
+      this._warmupHasUserGesture = true;
       pointer.event?.preventDefault?.();
       pointer.event?.stopPropagation?.();
-
-      if (this.emailOverlay?.isOpen?.()) return;
 
       // Any touch counts as a user gesture for iOS-safe music unlock/start.
       if (this.gameMusic) this.gameMusic.startFromGesture();
@@ -1193,7 +1681,7 @@ class RoomScene extends Phaser.Scene {
         const r = this.dpadHit.radius;
         if (inCircle(p.x, p.y, this.dpadHit.x, this.dpadHit.y, r)) {
           this.dpadPointerId = pointer.id;
-          handleDpadAtPoint(p.x, p.y);
+          handleDpadAtPoint(p.x, p.y, this.time.now);
           return;
         }
       }
@@ -1221,10 +1709,13 @@ class RoomScene extends Phaser.Scene {
 
     this._onControlPointerMove = (pointer) => {
       if (this.transitionFailed) return;
+      if (this.uiModalOpen) return;
+      pointer?.event?.preventDefault?.();
+      pointer?.event?.stopPropagation?.();
       const p = uiPoint(pointer);
 
       if (this.dpadPointerId !== null && pointer.id === this.dpadPointerId) {
-        handleDpadAtPoint(p.x, p.y);
+        handleDpadAtPoint(p.x, p.y, this.time.now);
       }
 
       // We do NOT need pointer-move handling for A.
@@ -1232,6 +1723,7 @@ class RoomScene extends Phaser.Scene {
 
     this._onControlPointerEnd = (pointer) => {
       if (this.transitionFailed) return;
+      if (this.uiModalOpen) return;
       pointer?.event?.preventDefault?.();
       pointer?.event?.stopPropagation?.();
 
@@ -1269,7 +1761,15 @@ class RoomScene extends Phaser.Scene {
 
   computeControlMetrics(deckHeight) {
     const scaleDown = 0.95;
-    const dpadRadius = Math.round(Phaser.Math.Clamp(deckHeight * 0.28, 70, 90) * scaleDown);
+    const baseDpadRadius = Math.round(Phaser.Math.Clamp(deckHeight * 0.28, 70, 90) * scaleDown);
+    const isCoarsePointer =
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(pointer: coarse)").matches;
+    const coarseMult = isCoarsePointer ? 1.25 : 1;
+    const rawRadius = Math.round(baseDpadRadius * coarseMult);
+    const maxRadius = Math.round(Phaser.Math.Clamp(deckHeight * 0.36, 98, 118));
+    const dpadRadius = Phaser.Math.Clamp(rawRadius, 0, maxRadius);
     const aVisualRadius = Math.round(Phaser.Math.Clamp(deckHeight * 0.18, 30, 42) * scaleDown);
     const aHitRadius = Math.round(Phaser.Math.Clamp(aVisualRadius * 1.8, 58, 76) * scaleDown);
     const bVisualRadius = aVisualRadius;
@@ -1304,6 +1804,7 @@ class RoomScene extends Phaser.Scene {
   layout() {
     if (this.isShuttingDown) return;
     if (!this.scale || !this.gameCam || !this.uiCam) return;
+    if (this._perfHudActive) this._perfHudLayoutCount += 1;
     const canvasW = this.scale.width;
     const canvasH = this.scale.height;
 
@@ -1380,8 +1881,23 @@ class RoomScene extends Phaser.Scene {
     this.applyControlMetrics(metrics);
 
     const pad = 24;
+    const isCoarsePointer =
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(pointer: coarse)").matches;
+    const dpadSafeEdgeInset = isCoarsePointer
+      ? Phaser.Math.Clamp(Math.round(canvasW * 0.02), 8, 12)
+      : 24;
+    const dpadLeftNudge = 6;
+    const dpadNudgeX = isCoarsePointer
+      ? Phaser.Math.Clamp(Math.round(canvasW * 0.03), 14, 20)
+      : 0;
     const dpadX = Math.round(
-      Phaser.Math.Clamp(pad + metrics.dpadRadius, metrics.dpadRadius, canvasW - metrics.dpadRadius)
+      Phaser.Math.Clamp(
+        pad + metrics.dpadRadius - dpadLeftNudge - dpadNudgeX,
+        metrics.dpadRadius + dpadSafeEdgeInset,
+        canvasW - metrics.dpadRadius
+      )
     );
     const abShiftRight = 46;
     const aRightInset = Math.round(metrics.aHitRadius * 0.35);
@@ -1392,7 +1908,7 @@ class RoomScene extends Phaser.Scene {
         canvasW - aRightInset
       )
     );
-    const dpadRaise = 8;
+    const dpadRaise = isCoarsePointer ? -2 : 8;
     const dpadY = Math.round(
       Phaser.Math.Clamp(
         deckTop + deckHeight * 0.5 - dpadRaise,
@@ -1437,6 +1953,7 @@ class RoomScene extends Phaser.Scene {
 
     if (this.shop) this.shop.layout(this.gameCam);
     if (this.tvOverlay) this.tvOverlay.layout(this.gameCam);
+    if (this.arcadeOverlay) this.arcadeOverlay.layout(this.gameCam);
   }
 
   updateInteractCandidate(now) {
@@ -1666,7 +2183,7 @@ class RoomScene extends Phaser.Scene {
   }
 
   handleA(timeNow) {
-    if (this.emailOverlay?.isOpen?.()) {
+    if (this.uiModalOpen) {
       return;
     }
 
@@ -1703,6 +2220,17 @@ class RoomScene extends Phaser.Scene {
     }
 
     if (this.isMainRoom()) {
+      if (candidate.id === "arcade" && this.arcadeOverlay) {
+        if (this.arcadeOpenPending) this.cancelPendingArcadeOpen();
+        this.resetInputState();
+        this.tryPlayArcadeInteractSfx();
+        if (!this.arcadeOverlay?.isOpen) {
+          this.arcadeOverlay.open();
+          this.arcadeOverlay.layout(this.gameCam);
+        }
+        return;
+      }
+
       if (candidate.id === "pc" && this.shop) {
         this.shop.unlockAudioFromGesture();
         this.shop.open();
@@ -1775,24 +2303,95 @@ class RoomScene extends Phaser.Scene {
     this.player.setTexture(tex, frame);
   }
 
-  update() {
+  update(time, delta) {
     if (this.transitionFailed) return;
     this.inputTick += 1;
     const now = this.time.now;
+    const rawDelta = Number.isFinite(delta) ? delta : 16.67;
+    const dt = Phaser.Math.Clamp(rawDelta, 0, 33);
 
-    const emailOpen = !!this.emailOverlay?.isOpen?.();
-    if (!emailOpen && this.emailOverlayWasOpen) {
+    if (DEBUG_UI && this._perfHudActive) {
+      const elapsed = now - this._perfHudStart;
+      if (elapsed >= 2000) {
+        this._perfHudActive = false;
+        this.safeDestroyObject(this._perfHudText);
+        this._perfHudText = null;
+      } else if (this.isValidDisplayObject(this._perfHudText)) {
+        const hudDt = Phaser.Math.Clamp(rawDelta, 0, 250);
+        if (hudDt > this._perfHudMaxDt) this._perfHudMaxDt = hudDt;
+        if (hudDt > 40) this._perfHudHitches += 1;
+        this._perfHudText.setText(
+          [
+            `dt ${hudDt.toFixed(1)}ms`,
+            `max ${this._perfHudMaxDt.toFixed(1)}ms`,
+            `hitch ${this._perfHudHitches}`,
+            `layout ${this._perfHudLayoutCount}`,
+          ].join("\n")
+        );
+      }
+    }
+
+    if (this._warmupNeedsInputReset) {
+      this.resetInputState();
+      this.clearTouchMoveFlags();
+      if (this.touch) this.touch.interact = false;
+      this.dpadLockDir = null;
+      this.dpadDesiredDir = null;
+      this._warmupNeedsInputReset = false;
+    }
+
+    this.uiModalOpen = !!this.emailOverlay?.isOpen?.();
+    if (!this.uiModalOpen && this.emailOverlayWasOpen) {
       this.emailOverlayWasOpen = false;
       this.resetInputState();
     }
 
-    if (emailOpen) {
+    if (this.uiModalOpen) {
       this.emailOverlayWasOpen = true;
-      const backJust =
+      if (this.gameMusic) this.gameMusic.pauseForOverlay();
+      this.freezePlayer();
+      return;
+    }
+
+    const arcadeAJust = !!this.arcadeTouchAJust;
+    const arcadeBJust = !!this.arcadeTouchBJust;
+    this.arcadeTouchAJust = false;
+    this.arcadeTouchBJust = false;
+
+    if (this.arcadeOpenPending) {
+      const cancelJust =
         (this.keyB && Phaser.Input.Keyboard.JustDown(this.keyB)) ||
         (this.keyEsc && Phaser.Input.Keyboard.JustDown(this.keyEsc));
-      if (backJust) this.emailOverlay.close();
+      if (cancelJust) {
+        this.cancelPendingArcadeOpen();
+      }
+      this.freezePlayer();
+      return;
+    }
+
+    if (this.arcadeOverlay?.isOpen) {
+      const left = this.cursors.left.isDown || this.touch.left;
+      const right = this.cursors.right.isDown || this.touch.right;
+      const up = this.cursors.up.isDown || this.touch.up;
+      const down = this.cursors.down.isDown || this.touch.down;
+      const aJust =
+        arcadeAJust ||
+        Phaser.Input.Keyboard.JustDown(this.keyA) ||
+        Phaser.Input.Keyboard.JustDown(this.keySpace);
+      const backJust =
+        arcadeBJust ||
+        (this.keyB && Phaser.Input.Keyboard.JustDown(this.keyB)) ||
+        (this.keyEsc && Phaser.Input.Keyboard.JustDown(this.keyEsc));
+      const aDown = (this.keyA && this.keyA.isDown) || (this.keySpace && this.keySpace.isDown);
+
       if (this.gameMusic) this.gameMusic.pauseForOverlay();
+      this.arcadeOverlay.layout(this.gameCam);
+      this.arcadeOverlay.tick(now, { up, down, left, right, aJust, aDown, bJust: backJust });
+
+      if (!this.arcadeOverlay.isOpen) {
+        this.resetInputState();
+      }
+
       this.freezePlayer();
       return;
     }
@@ -1822,7 +2421,10 @@ class RoomScene extends Phaser.Scene {
     }
 
     if (this.shop && this.shop.isOpen) {
-      if (!this.shopOpenedAt) this.shopOpenedAt = now;
+      if (!this.shopOpenedAt) {
+        this.shopOpenedAt = now;
+        this.emailPromptSnoozedThisSession = false;
+      }
 
       const left = this.cursors.left.isDown || this.touch.left;
       const right = this.cursors.right.isDown || this.touch.right;
@@ -1843,7 +2445,7 @@ class RoomScene extends Phaser.Scene {
 
       if (!this.shop.isOpen) {
         this.shopOpenedAt = 0;
-        this.shopEmailPromptShown = false;
+        this.emailPromptSnoozedThisSession = false;
         this.resetInputState();
         this.freezePlayer();
         return;
@@ -1851,12 +2453,11 @@ class RoomScene extends Phaser.Scene {
 
       if (
         !this.identitySubmitted &&
-        !this.shopEmailPromptShown &&
-        now - this.shopOpenedAt >= 60000 &&
+        !this.emailPromptSnoozedThisSession &&
+        now - this.shopOpenedAt >= 30000 &&
         this.emailOverlay &&
         !this.emailOverlay.isOpen()
       ) {
-        this.shopEmailPromptShown = true;
         this.resetInputState();
         this.emailOverlay.open({
           name: this.localIdentity?.name || "",
@@ -1870,7 +2471,7 @@ class RoomScene extends Phaser.Scene {
     }
 
     this.shopOpenedAt = 0;
-    this.shopEmailPromptShown = false;
+    this.emailPromptSnoozedThisSession = false;
 
     if (this.gameMusic && !this.tvOverlay?.isOpen && !this.shop?.isOpen) {
       this.gameMusic.resumeAfterOverlay();
@@ -1913,6 +2514,9 @@ class RoomScene extends Phaser.Scene {
     const body = this.player.body;
     if (!body) return;
 
+    // Touch D-pad movement starts only after turn-hold delay (Pokemon-style turn in place).
+    this.applyDpadTouchMovement(now);
+
     const leftPressed = (this.cursors?.left?.isDown || false) || !!this.touch.left;
     const rightPressed = (this.cursors?.right?.isDown || false) || !!this.touch.right;
     const upPressed = (this.cursors?.up?.isDown || false) || !!this.touch.up;
@@ -1937,7 +2541,7 @@ class RoomScene extends Phaser.Scene {
       let dir = this.facing;
       if (Math.abs(vx) > Math.abs(vy)) dir = vx < 0 ? "left" : "right";
       else dir = vy < 0 ? "up" : "down";
-
+      // Start walk animation immediately when movement input is active.
       this.playWalk(dir);
     } else {
       body.setVelocity(0, 0);
@@ -1945,8 +2549,37 @@ class RoomScene extends Phaser.Scene {
     }
 
     const playerBaseY = body.bottom;
-    this.player.setDepth(playerBaseY);
+    if (this.isTrophyRoom()) this.syncTrophyPillarDepths(playerBaseY);
+    else this.player.setDepth(playerBaseY);
     if (this.worldLayer?.sort) this.worldLayer.sort("depth");
+  }
+
+  setModalKeyboardCapture(isModalOpen) {
+    const keyboard = this.input?.keyboard;
+    if (!keyboard) return;
+
+    if (isModalOpen) {
+      if (typeof this.keyboardPreventDefaultBeforeModal !== "boolean") {
+        this.keyboardPreventDefaultBeforeModal = keyboard.preventDefault;
+      }
+      keyboard.enabled = false;
+      keyboard.preventDefault = false;
+      return;
+    }
+
+    keyboard.enabled = true;
+    keyboard.preventDefault =
+      typeof this.keyboardPreventDefaultBeforeModal === "boolean"
+        ? this.keyboardPreventDefaultBeforeModal
+        : true;
+    keyboard.resetKeys?.();
+  }
+
+  dismissEmailPromptForShopSession() {
+    this.emailPromptSnoozedThisSession = true;
+    if (this.emailOverlay?.isOpen?.()) this.emailOverlay.close();
+    this.emailOverlayWasOpen = false;
+    this.resetInputState();
   }
 }
 export default RoomScene;

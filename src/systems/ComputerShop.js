@@ -5,7 +5,7 @@ export default class ComputerShop {
     this.scene = scene;
 
     this.isOpen = false;
-    this.data = { pageSize: 6, items: [] };
+    this.data = { pageSize: 5, items: [] };
 
     this.page = 0;
     this.index = 0;
@@ -27,6 +27,7 @@ export default class ComputerShop {
 
     this.rowHits = [];
     this._listAnchor = null;
+    this._didSanityCheck = false;
 
     this.container = scene.add.container(0, 0);
     this.container.setVisible(false);
@@ -116,12 +117,38 @@ export default class ComputerShop {
   }
 
   normalizeLoadedData(json) {
-    const pageSize = Number.isFinite(json?.pageSize) ? json.pageSize : 6;
+    const pageSize = Number.isFinite(json?.pageSize) ? json.pageSize : 5;
     const items = normalizeShopItems(json?.items || [], pageSize).map((item, index) => ({
       ...item,
       beatId: deriveBeatId(item, index),
     }));
     return { pageSize, items };
+  }
+
+  runShopSanityCheck() {
+    if (this._didSanityCheck) return;
+    this._didSanityCheck = true;
+
+    const pageSize = Number.isFinite(this.data?.pageSize) ? this.data.pageSize : 5;
+    const items = Array.isArray(this.data?.items) ? this.data.items : [];
+    const isCoffee = (item) => {
+      const name = String(item?.name || "").toLowerCase();
+      const id = String(item?.id || "").toLowerCase();
+      return name === "buymecoffee" || name === "buy me a coffee" || id === "coffee";
+    };
+
+    const beatCount = items.filter((item) => !isCoffee(item)).length;
+    const coffeeIndex = items.findIndex((item) => isCoffee(item));
+    const coffeeExpected = Math.max(0, pageSize - 1);
+    if (beatCount !== 20 || coffeeIndex !== coffeeExpected) {
+      console.warn("[ComputerShop] shop.json sanity warning", {
+        beatCount,
+        expectedBeatCount: 20,
+        coffeeIndex,
+        expectedCoffeeIndex: coffeeExpected,
+        pageSize,
+      });
+    }
   }
 
   async load() {
@@ -130,6 +157,7 @@ export default class ComputerShop {
       if (!res.ok) throw new Error(`shop.json HTTP ${res.status}`);
       const json = await res.json();
       this.data = this.normalizeLoadedData(json || {});
+      this.runShopSanityCheck();
       this.page = 0;
       this.index = 0;
       this.render();
@@ -146,6 +174,7 @@ export default class ComputerShop {
           { id: "beat5", name: "BEAT 05", price: 100, preview: "/previews/beat05.mp3", buyUrl: "", beatId: "beat-05" },
         ],
       });
+      this.runShopSanityCheck();
       this.page = 0;
       this.index = 0;
       this.render();
@@ -294,7 +323,7 @@ export default class ComputerShop {
 
   pageItems() {
     const items = this.data?.items || [];
-    const size = this.data?.pageSize || 6;
+    const size = this.data?.pageSize || 5;
     const start = this.page * size;
     return items.slice(start, start + size);
   }
@@ -335,7 +364,7 @@ export default class ComputerShop {
   }
 
   ensureRowHits() {
-    const size = this.data?.pageSize || 6;
+    const size = this.data?.pageSize || 5;
     while (this.rowHits.length < size) {
       const rowIndex = this.rowHits.length;
       const hit = this.scene.add.rectangle(0, 0, 10, 10, 0x000000, 0);
@@ -403,7 +432,7 @@ export default class ComputerShop {
   render() {
     const pageItems = this.pageItems();
     const total = this.data?.items?.length || 0;
-    const size = this.data?.pageSize || 6;
+    const size = this.data?.pageSize || 5;
     const pageCount = Math.max(1, Math.ceil(total / size));
 
     const lines = [];
@@ -512,7 +541,7 @@ export default class ComputerShop {
 
   movePage(delta) {
     const total = this.data?.items?.length || 0;
-    const size = this.data?.pageSize || 6;
+    const size = this.data?.pageSize || 5;
     const pageCount = Math.max(1, Math.ceil(total / size));
     const next = Math.max(0, Math.min(pageCount - 1, this.page + delta));
     if (next === this.page) return;
@@ -586,7 +615,7 @@ export default class ComputerShop {
         this.lastMoveAt = now;
         if (this.index <= 0 && this.page > 0) {
           const total = this.data?.items?.length || 0;
-          const size = this.data?.pageSize || 6;
+          const size = this.data?.pageSize || 5;
           const pageCount = Math.max(1, Math.ceil(total / size));
           this.page = Math.max(0, Math.min(pageCount - 1, this.page - 1));
           const prevPageItems = this.pageItems();
@@ -601,7 +630,7 @@ export default class ComputerShop {
         const page = this.pageItems();
         if (page.length && this.index >= page.length - 1) {
           const total = this.data?.items?.length || 0;
-          const size = this.data?.pageSize || 6;
+          const size = this.data?.pageSize || 5;
           const pageCount = Math.max(1, Math.ceil(total / size));
           this.page = Math.max(0, Math.min(pageCount - 1, this.page + 1));
           this.index = 0;

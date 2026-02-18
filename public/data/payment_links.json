@@ -1,0 +1,12 @@
+{
+  "links": {
+    "https://example.com/replace-with-your-payment-link?beat=beat01": {
+      "beatId": "beat01",
+      "beatName": "InTheClub"
+    },
+    "https://example.com/replace-with-your-payment-link?beat=beat02": {
+      "beatId": "beat02",
+      "beatName": "Overstimmyed"
+    }
+  }
+}
