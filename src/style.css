@@ -882,6 +882,7 @@ body.route-home .nav-link.is-active {
   z-index: 1;
   width: min(100%, 430px);
   height: 100%;
+  min-height: min(100dvh, 900px);
   max-height: 900px;
   border: 1px solid #2f2f2f;
   background: #000;
@@ -893,6 +894,23 @@ body.route-home .nav-link.is-active {
   z-index: 1;
   display: block;
   touch-action: none;
+}
+
+.game-fatal {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  z-index: 70;
+  margin: 0;
+  width: min(92vw, 34rem);
+  padding: 0.42rem 0.58rem;
+  border: 1px solid #8e3c3c;
+  background: rgba(37, 8, 8, 0.94);
+  color: #ffe1e1;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  text-align: center;
 }
 
 .nickname-modal {

@@ -13,6 +13,7 @@ const STUDIO_MEDIA_IMAGE_MS = 7000;
 const STUDIO_MEDIA_VIDEO_MS = 22000;
 const STUDIO_MEDIA_VIDEO_EXTENSIONS = new Set(["mp4", "webm", "ogg", "mov", "m4v"]);
 const STUDIO_MEDIA_IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "avif", "gif"]);
+const DEBUG_NICKNAME_CLAIM = false;
 
 const NAV_LINKS = [
   { path: "/", label: "Home" },
@@ -37,6 +38,9 @@ let gameMountRaf = null;
 let nicknameViewportCleanup = null;
 let studioMediaCleanup = null;
 let nicknameRegistryWarningShown = false;
+let gameFatalErrorMessage = "";
+let gameRouteErrorCleanup = null;
+const GAME_MOUNT_MAX_RETRIES = 20;
 
 function makeSealPoints({ teeth = 33, cx = 60, cy = 60, outerR = 56, innerR = 50 } = {}) {
   // Produces a serrated seal like a foil sticker (small tooth depth).
@@ -75,13 +79,95 @@ function createGame(parentId) {
   });
 }
 
-function mountGame() {
-  if (gameInstance) return;
-  if (!document.getElementById("game-root")) return;
-  gameInstance = createGame("game-root");
+function syncGameFatalOverlay() {
+  const fatal = appEl.querySelector("[data-game-fatal]");
+  if (!fatal) return;
+  if (!gameFatalErrorMessage) {
+    fatal.hidden = true;
+    fatal.textContent = "";
+    return;
+  }
+  fatal.hidden = false;
+  fatal.textContent = `Game failed to start: ${gameFatalErrorMessage}`;
 }
 
-function scheduleGameMount() {
+function setGameFatalError(message) {
+  gameFatalErrorMessage = String(message || "Unknown error");
+  syncGameFatalOverlay();
+}
+
+function clearGameFatalError() {
+  gameFatalErrorMessage = "";
+  syncGameFatalOverlay();
+}
+
+function bindGameRouteErrorCapture(isGameRoute) {
+  if (!isGameRoute) {
+    if (typeof gameRouteErrorCleanup === "function") {
+      gameRouteErrorCleanup();
+      gameRouteErrorCleanup = null;
+    }
+    return;
+  }
+  if (typeof gameRouteErrorCleanup === "function") return;
+
+  const onWindowError = (event) => {
+    if (getRoutePath() !== "/game") return;
+    const message = event?.error?.message || event?.message || "Unknown error";
+    console.error("[GameRoute] window.onerror", event?.error || event);
+    setGameFatalError(message);
+  };
+
+  const onUnhandledRejection = (event) => {
+    if (getRoutePath() !== "/game") return;
+    const reason = event?.reason;
+    const message =
+      reason?.message ||
+      (typeof reason === "string" ? reason : "") ||
+      "Unhandled promise rejection";
+    console.error("[GameRoute] unhandledrejection", reason || event);
+    setGameFatalError(message);
+  };
+
+  window.addEventListener("error", onWindowError);
+  window.addEventListener("unhandledrejection", onUnhandledRejection);
+  gameRouteErrorCleanup = () => {
+    window.removeEventListener("error", onWindowError);
+    window.removeEventListener("unhandledrejection", onUnhandledRejection);
+  };
+}
+
+function mountGame() {
+  if (gameInstance) return true;
+  const root = document.getElementById("game-root");
+  if (!root) return false;
+
+  const rect = root.getBoundingClientRect();
+  console.log("[GameRoute] mountGame:start", {
+    width: Math.round(rect.width),
+    height: Math.round(rect.height),
+  });
+  if (rect.width < 10 || rect.height < 10) {
+    console.warn("[GameRoute] mountGame:root-not-ready", {
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+    });
+    return false;
+  }
+
+  try {
+    gameInstance = createGame("game-root");
+    console.log("[GameRoute] mountGame:success");
+    clearGameFatalError();
+    return true;
+  } catch (error) {
+    console.error("[GameRoute] mountGame:failed", error);
+    setGameFatalError(error?.message || String(error || "Unknown error"));
+    return false;
+  }
+}
+
+function scheduleGameMount(retryCount = 0) {
   if (gameMountRaf !== null) window.cancelAnimationFrame(gameMountRaf);
   gameMountRaf = window.requestAnimationFrame(() => {
     gameMountRaf = null;
@@ -89,7 +175,16 @@ function scheduleGameMount() {
     const modal = appEl.querySelector("[data-nickname-modal]");
     if (modal && !modal.hidden) return;
     if (!getNickname()) return;
-    mountGame();
+
+    const mounted = mountGame();
+    if (mounted) return;
+
+    if (retryCount < GAME_MOUNT_MAX_RETRIES) {
+      scheduleGameMount(retryCount + 1);
+      return;
+    }
+
+    setGameFatalError("Game root did not become ready. Please refresh and try again.");
   });
 }
 
@@ -372,8 +467,11 @@ function renderApp() {
     gameMountRaf = null;
   }
 
+  bindGameRouteErrorCapture(isGameRoute);
+
   if (currentPath === "/game" && !isGameRoute) {
     unmountGame();
+    clearGameFatalError();
   }
 
   document.title = `${route.title} | ${BRAND}`;
@@ -381,6 +479,7 @@ function renderApp() {
   // Game route is full-bleed to avoid the double wrapper / orientation issues.
   if (isGameRoute) {
     appEl.innerHTML = route.render();
+    syncGameFatalOverlay();
   } else {
     appEl.innerHTML = `
       <div class="site-shell">
@@ -619,6 +718,28 @@ function bindGameNicknameGate(isGameRoute) {
     if (submitBtn) submitBtn.disabled = pending;
   };
 
+  const focusNicknameInputForRetry = () => {
+    const applyFocus = () => {
+      try {
+        input.focus({ preventScroll: true });
+      } catch {
+        try { input.focus(); } catch {}
+      }
+      try { input.select(); } catch {}
+    };
+
+    applyFocus();
+    window.requestAnimationFrame(() => {
+      if (modal.hidden) return;
+      applyFocus();
+    });
+  };
+
+  const debugNicknameClaim = (...parts) => {
+    if (!DEBUG_NICKNAME_CLAIM) return;
+    console.log("[NicknameClaim]", ...parts);
+  };
+
   const isNicknameTakenLocally = (nickname, previousNickname = "") => {
     const target = canonicalizeNickname(nickname);
     if (!target) return false;
@@ -659,24 +780,32 @@ function bindGameNicknameGate(isGameRoute) {
         payload = null;
       }
 
-      if (claimResponse.status === 409) return { ok: false, reason: "taken" };
-      if (claimResponse.status === 400) return { ok: false, reason: "invalid" };
-      if (!claimResponse.ok) return { ok: false, reason: "unavailable" };
+      debugNicknameClaim("response", claimResponse.status, payload?.error || "");
+
+      if (claimResponse.status === 409 || payload?.error === "taken") return { ok: false, reason: "taken" };
+      if (claimResponse.status === 400 || payload?.error === "invalid") return { ok: false, reason: "invalid" };
+      if (claimResponse.status === 501 || payload?.error === "registry_unavailable") {
+        return { ok: false, reason: "registry_unavailable" };
+      }
+      if (!claimResponse.ok) return { ok: false, reason: "error" };
 
       const claimedNickname = canonicalizeNickname(payload?.nickname || nickname);
       return { ok: true, nickname: claimedNickname || nickname };
-    } catch {
-      return { ok: false, reason: "unavailable" };
+    } catch (error) {
+      debugNicknameClaim("network-error", error?.message || String(error || ""));
+      return { ok: false, reason: "network_error" };
     }
   };
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const candidate = canonicalizeNickname(input.value);
+    const rawCandidate = input.value;
+    const candidate = canonicalizeNickname(rawCandidate);
+    debugNicknameClaim("submit", { raw: rawCandidate, canonical: candidate });
     input.value = candidate;
     if (!validateNickname(candidate)) {
       showError("Nickname becomes 2–10 uppercase letters/numbers/underscore (spaces and other characters are removed).");
-      input.focus();
+      focusNicknameInputForRetry();
       return;
     }
 
@@ -685,32 +814,40 @@ function bindGameNicknameGate(isGameRoute) {
     setNicknameSubmitPending(true);
     const claimResult = await claimNickname(candidate);
     setNicknameSubmitPending(false);
+    let allowLocalFallback = false;
 
     if (!claimResult.ok && claimResult.reason === "taken") {
       showError("That nickname is taken. Try another.");
-      input.focus();
+      focusNicknameInputForRetry();
       return;
     }
     if (!claimResult.ok && claimResult.reason === "invalid") {
       showError("Nickname becomes 2–10 uppercase letters/numbers/underscore (spaces and other characters are removed).");
-      input.focus();
+      focusNicknameInputForRetry();
       return;
     }
-    if (!claimResult.ok) {
+    if (!claimResult.ok && (claimResult.reason === "registry_unavailable" || claimResult.reason === "network_error")) {
       if (isNicknameTakenLocally(candidate, previousNickname)) {
         showError("That nickname is taken. Try another.");
-        input.focus();
+        focusNicknameInputForRetry();
         return;
       }
+      allowLocalFallback = true;
       if (!nicknameRegistryWarningShown) {
         nicknameRegistryWarningShown = true;
         window.alert("Online nickname registry unavailable; nickname uniqueness is local-only right now.");
       }
     }
+    if (!claimResult.ok && !allowLocalFallback) {
+      showError("Could not verify nickname right now. Try again in a moment.");
+      focusNicknameInputForRetry();
+      return;
+    }
 
     const saved = setNickname(claimResult.nickname || candidate);
     if (!saved) {
       showError("Could not save nickname. Try again.");
+      focusNicknameInputForRetry();
       return;
     }
     modal.dataset.required = "false";
@@ -931,6 +1068,7 @@ function renderGamePage() {
         Player: <span data-game-nickname>${escapeHtml(nickname)}</span>
       </p>
       <div id="game-root" class="game-root"></div>
+      <p class="game-fatal" data-game-fatal role="alert" hidden></p>
       <div
         class="nickname-modal"
         data-nickname-modal
@@ -950,7 +1088,7 @@ function renderGamePage() {
               data-nickname-input
               type="text"
               autofocus
-              maxlength="40"
+              maxlength="10"
               autocomplete="nickname"
               inputmode="text"
             />
