@@ -1,6 +1,9 @@
 import {
   getArcadeNickname,
   getLeaderboard as readLeaderboard,
+  getLeaderboardSource as readLeaderboardSource,
+  onLeaderboardUpdated,
+  requestLeaderboardRefresh,
   submitScore as submitLeaderboardScore,
 } from "./ArcadePersistence";
 
@@ -15,6 +18,14 @@ export default class ArcadeGameRunner {
     this.currentMessage = "";
     this.lastDoneState = false;
     this.leaderboardCache = {};
+    this.leaderboardRefreshInFlight = {};
+    this.onLeaderboardChanged = null;
+    this.offLeaderboardUpdated = onLeaderboardUpdated((gameId) => {
+      const key = String(gameId || "").toLowerCase();
+      if (!key) return;
+      this.leaderboardCache[key] = readLeaderboard(key);
+      if (typeof this.onLeaderboardChanged === "function") this.onLeaderboardChanged(key);
+    });
 
     this.gameWidth = 0;
     this.gameHeight = 0;
@@ -62,10 +73,31 @@ export default class ArcadeGameRunner {
   getLeaderboard(gameId) {
     const key = String(gameId || "").toLowerCase();
     if (!key) return [];
-    if (!this.leaderboardCache[key]) {
-      this.leaderboardCache[key] = readLeaderboard(key);
-    }
+    this.leaderboardCache[key] = readLeaderboard(key);
+    this.requestLeaderboard(key, { force: false });
     return this.leaderboardCache[key];
+  }
+
+  getLeaderboardSource(gameId) {
+    const key = String(gameId || "").toLowerCase();
+    if (!key) return "unknown";
+    return readLeaderboardSource(key);
+  }
+
+  requestLeaderboard(gameId, { force = false } = {}) {
+    const key = String(gameId || "").toLowerCase();
+    if (!key) return;
+    if (!force && this.leaderboardRefreshInFlight[key]) return;
+    this.leaderboardRefreshInFlight[key] = true;
+    requestLeaderboardRefresh(key, { force })
+      .then((entries) => {
+        this.leaderboardCache[key] = Array.isArray(entries) ? entries : readLeaderboard(key);
+        if (typeof this.onLeaderboardChanged === "function") this.onLeaderboardChanged(key);
+      })
+      .catch(() => {})
+      .finally(() => {
+        this.leaderboardRefreshInFlight[key] = false;
+      });
   }
 
   refreshLeaderboard(gameId) {
@@ -73,6 +105,7 @@ export default class ArcadeGameRunner {
     if (!key) return [];
     const next = readLeaderboard(key);
     this.leaderboardCache[key] = next;
+    this.requestLeaderboard(key, { force: true });
     return next;
   }
 
@@ -86,7 +119,8 @@ export default class ArcadeGameRunner {
     const gameId = this.currentGameDef?.id;
     if (!gameId) return;
     if (!Number.isFinite(this.currentScore) || this.currentScore <= 0) return;
-    const nickname = getArcadeNickname() || "PLAYER";
+    const nickname = getArcadeNickname();
+    if (!nickname) return;
     submitLeaderboardScore(gameId, nickname, this.currentScore);
     this.refreshLeaderboard(gameId);
   }
@@ -122,7 +156,11 @@ export default class ArcadeGameRunner {
   }
 
   stopGame() {
-    if (this.currentGameDef?.id && !this.lastDoneState && this.currentScore > 0) {
+    const allowSubmitOnStop =
+      !this.currentGame || typeof this.currentGame.submitScoreOnStop !== "function"
+        ? true
+        : !!this.currentGame.submitScoreOnStop();
+    if (this.currentGameDef?.id && allowSubmitOnStop && !this.lastDoneState && this.currentScore > 0) {
       this.submitCurrentScore();
     }
 
@@ -185,6 +223,9 @@ export default class ArcadeGameRunner {
   destroy() {
     this.stopGame();
     try {
+      if (typeof this.offLeaderboardUpdated === "function") this.offLeaderboardUpdated();
+    } catch {}
+    try {
       this.frameBorder?.destroy?.();
       this.frameFill?.destroy?.();
       this.gameContainer?.destroy?.(true);
@@ -192,5 +233,7 @@ export default class ArcadeGameRunner {
     this.frameBorder = null;
     this.frameFill = null;
     this.gameContainer = null;
+    this.onLeaderboardChanged = null;
+    this.offLeaderboardUpdated = null;
   }
 }

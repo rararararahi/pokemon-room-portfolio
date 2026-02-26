@@ -8,6 +8,13 @@ export default class TVOverlay {
     this.pendingUnmute = false;
     this.videoId = "";
     this.player = null;
+    this.playerIframe = null;
+    this.loadFailed = false;
+    this.loadWatchdog = null;
+    this.loadRebuildTried = false;
+    this._layoutCheckRaf = null;
+    this.soundUnlockRetryTimer = null;
+    this.soundUnlockRetriesRemaining = 0;
 
     this.container = scene.add.container(0, 0);
     this.container.setVisible(false);
@@ -32,6 +39,7 @@ export default class TVOverlay {
     this.rootEl.style.boxSizing = "border-box";
     this.rootEl.style.pointerEvents = "none";
     this.rootEl.style.touchAction = "manipulation";
+    this.rootEl.style.zIndex = "2";
 
     this.playerMount = document.createElement("div");
     this.playerMount.style.position = "absolute";
@@ -40,12 +48,14 @@ export default class TVOverlay {
     this.playerMount.style.width = "100%";
     this.playerMount.style.height = "100%";
     this.playerMount.style.background = "#000000";
+    this.playerMount.style.zIndex = "2";
 
     this.hintEl = document.createElement("div");
     this.hintEl.textContent = "Press A for sound";
     this.hintEl.style.position = "absolute";
-    this.hintEl.style.left = "8px";
-    this.hintEl.style.top = "8px";
+    this.hintEl.style.left = "50%";
+    this.hintEl.style.bottom = "8px";
+    this.hintEl.style.transform = "translateX(-50%)";
     this.hintEl.style.padding = "4px 6px";
     this.hintEl.style.background = "rgba(0, 0, 0, 0.6)";
     this.hintEl.style.color = "#ffffff";
@@ -61,6 +71,7 @@ export default class TVOverlay {
     this.dom = scene.add.dom(0, 0, this.rootEl);
     this.dom.setOrigin(0, 0);
     this.dom.setVisible(false);
+    this.ensureDomContainerLayer();
 
     this.container.add([this.dim, this.dom]);
 
@@ -70,6 +81,13 @@ export default class TVOverlay {
         if (this.isOpen) this.ensurePlayer();
       })
       .catch(() => {});
+  }
+
+  ensureDomContainerLayer() {
+    const domContainer = this.scene?.game?.domContainer;
+    if (!domContainer) return;
+    domContainer.style.zIndex = "4";
+    domContainer.style.pointerEvents = "none";
   }
 
   static loadYouTubeApi() {
@@ -110,24 +128,185 @@ export default class TVOverlay {
 
   extractVideoId(url) {
     if (!url) return "";
+    const sanitize = (value) => {
+      const match = String(value || "").match(/[A-Za-z0-9_-]{11}/);
+      return match ? match[0] : "";
+    };
     try {
       const parsed = new URL(url);
-      if (parsed.hostname.includes("youtu.be")) return parsed.pathname.replace("/", "");
+      if (parsed.hostname.includes("youtu.be")) return sanitize(parsed.pathname.replace("/", ""));
       const v = parsed.searchParams.get("v");
-      if (v) return v;
-      if (parsed.pathname.startsWith("/embed/")) return parsed.pathname.replace("/embed/", "");
+      if (v) return sanitize(v);
+      if (parsed.pathname.startsWith("/embed/")) return sanitize(parsed.pathname.replace("/embed/", ""));
     } catch {
       const match = url.match(/[?&]v=([^&]+)/);
-      if (match) return match[1];
+      if (match) return sanitize(match[1]);
       const short = url.match(/youtu\.be\/([^?]+)/);
-      if (short) return short[1];
+      if (short) return sanitize(short[1]);
     }
-    return url;
+    return sanitize(url);
   }
 
-  showHint(_visible) {
+  showHint(visible, text = "Press A for sound") {
     if (!this.hintEl) return;
-    this.hintEl.style.display = "none";
+    this.hintEl.textContent = text;
+    this.hintEl.style.display = visible ? "block" : "none";
+  }
+
+  configureIframeAttributes() {
+    if (!this.playerMount) return;
+    const iframe = this.playerMount.querySelector("iframe");
+    if (!iframe) {
+      this.playerIframe = null;
+      return;
+    }
+    this.playerIframe = iframe;
+    iframe.setAttribute("allow", "autoplay; encrypted-media; picture-in-picture");
+    iframe.setAttribute("referrerpolicy", "origin");
+    iframe.setAttribute("allowfullscreen", "");
+    iframe.style.width = "100%";
+    iframe.style.height = "100%";
+    iframe.style.border = "0";
+    iframe.style.display = "block";
+    iframe.style.position = "absolute";
+    iframe.style.left = "0";
+    iframe.style.top = "0";
+    iframe.style.background = "#000000";
+  }
+
+  clearLoadWatchdog() {
+    if (this.loadWatchdog) {
+      window.clearTimeout(this.loadWatchdog);
+      this.loadWatchdog = null;
+    }
+  }
+
+  scheduleLoadWatchdog() {
+    this.clearLoadWatchdog();
+    if (!this.isOpen) return;
+    this.loadWatchdog = window.setTimeout(() => {
+      if (!this.isOpen) return;
+      if (!this.apiReady) {
+        this.scheduleLoadWatchdog();
+        return;
+      }
+      const rootRect = this.rootEl?.getBoundingClientRect?.();
+      const iframe = this.playerMount?.querySelector?.("iframe");
+      const iframeRect = iframe?.getBoundingClientRect?.();
+      const rootReady = !!rootRect && rootRect.width > 50 && rootRect.height > 50;
+      const iframeReady = !!iframe && !!iframeRect && iframeRect.width > 50 && iframeRect.height > 50;
+      if (this.playerReady && rootReady && iframeReady) return;
+      if (!this.loadRebuildTried) {
+        this.loadRebuildTried = true;
+        this.rebuildPlayer();
+        this.scheduleLoadWatchdog();
+        return;
+      }
+      this.loadFailed = true;
+      this.showHint(true, "TV failed to load. Press A to retry.");
+    }, 1500);
+  }
+
+  rebuildPlayer() {
+    if (this.player?.destroy) {
+      try {
+        this.player.destroy();
+      } catch {}
+    }
+    this.player = null;
+    this.playerIframe = null;
+    this.playerReady = false;
+    if (this.playerMount) this.playerMount.innerHTML = "";
+    this.ensurePlayer();
+  }
+
+  sendPlayerCommand(command, args = []) {
+    this.configureIframeAttributes();
+    const iframe = this.playerIframe;
+    if (!iframe?.contentWindow) return false;
+    try {
+      iframe.contentWindow.postMessage(
+        JSON.stringify({
+          event: "command",
+          func: command,
+          args: Array.isArray(args) ? args : [],
+        }),
+        "*"
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  clearSoundUnlockRetry() {
+    if (this.soundUnlockRetryTimer) {
+      window.clearTimeout(this.soundUnlockRetryTimer);
+      this.soundUnlockRetryTimer = null;
+    }
+    this.soundUnlockRetriesRemaining = 0;
+  }
+
+  attemptSoundUnlock() {
+    if (!this.isOpen) {
+      this.clearSoundUnlockRetry();
+      return false;
+    }
+
+    const targetVolume = 80;
+    let attempted = false;
+    let unlocked = false;
+
+    if (this.playerReady && this.player) {
+      try {
+        this.player.unMute();
+        attempted = true;
+      } catch {}
+      try {
+        this.player.setVolume(targetVolume);
+        attempted = true;
+      } catch {}
+      try {
+        this.player.playVideo();
+        attempted = true;
+      } catch {}
+      try {
+        if (typeof this.player.isMuted === "function") {
+          unlocked = this.player.isMuted() === false;
+        }
+      } catch {}
+    }
+
+    if (this.sendPlayerCommand("unMute")) attempted = true;
+    if (this.sendPlayerCommand("setVolume", [targetVolume])) attempted = true;
+    if (this.sendPlayerCommand("playVideo")) attempted = true;
+
+    if (unlocked || (this.playerReady && attempted)) {
+      this.soundUnlocked = true;
+      this.pendingUnmute = false;
+      this.loadFailed = false;
+      this.showHint(false);
+      this.clearSoundUnlockRetry();
+      return true;
+    }
+
+    if (this.soundUnlockRetriesRemaining > 0) {
+      this.soundUnlockRetriesRemaining -= 1;
+      this.soundUnlockRetryTimer = window.setTimeout(() => {
+        this.soundUnlockRetryTimer = null;
+        this.attemptSoundUnlock();
+      }, 150);
+      return false;
+    }
+
+    this.soundUnlocked = false;
+    this.pendingUnmute = true;
+    this.showHint(true, "Press A for sound");
+    return false;
+  }
+
+  unlockSoundFromGesture() {
+    return this.enableSoundFromGesture();
   }
 
   startMutedPlayback() {
@@ -141,6 +320,7 @@ export default class TVOverlay {
 
   ensurePlayer() {
     if (!this.apiReady || !this.videoId) return;
+    this.ensureDomContainerLayer();
 
     if (!this.player) {
       this.player = new window.YT.Player(this.playerMount, {
@@ -151,48 +331,68 @@ export default class TVOverlay {
           autoplay: 1,
           playsinline: 1,
           mute: 1,
-          controls: 1,
+          controls: 0,
           rel: 0,
           modestbranding: 1,
+          enablejsapi: 1,
+          origin: window.location.origin,
         },
         events: {
           onReady: () => {
             this.playerReady = true;
-            this.startMutedPlayback();
-            if (this.pendingUnmute) this.enableSoundFromGesture();
+            this.loadFailed = false;
+            this.configureIframeAttributes();
+            if (this.pendingUnmute) {
+              this.enableSoundFromGesture();
+            } else {
+              this.showHint(true, "Press A for sound");
+              this.startMutedPlayback();
+            }
+          },
+          onError: () => {
+            this.playerReady = false;
+            this.loadFailed = true;
+            this.showHint(true, "TV failed to load. Press A to retry.");
           },
         },
       });
+      this.scheduleLoadWatchdog();
     } else if (this.playerReady && this.player.loadVideoById) {
       this.player.loadVideoById(this.videoId);
+      this.loadFailed = false;
       this.startMutedPlayback();
+      this.scheduleLoadWatchdog();
     }
+  }
+
+  scheduleLayoutCheck() {
+    if (this._layoutCheckRaf) {
+      window.cancelAnimationFrame(this._layoutCheckRaf);
+      this._layoutCheckRaf = null;
+    }
+    this._layoutCheckRaf = window.requestAnimationFrame(() => {
+      this._layoutCheckRaf = window.requestAnimationFrame(() => {
+        this._layoutCheckRaf = null;
+        if (!this.isOpen) return;
+        this.ensureDomContainerLayer();
+        const rootRect = this.rootEl?.getBoundingClientRect?.();
+        if (!rootRect || rootRect.width < 50 || rootRect.height < 50) {
+          const fallbackW = Math.max(80, Math.round(this.scene.scale.width - 20));
+          const fallbackH = Math.max(80, Math.round(this.scene.scale.height - 20));
+          this.rootEl.style.width = `${fallbackW}px`;
+          this.rootEl.style.height = `${fallbackH}px`;
+        }
+        this.scheduleLoadWatchdog();
+      });
+    });
   }
 
   enableSoundFromGesture() {
     if (this.soundUnlocked) return true;
-    if (!this.playerReady || !this.player) {
-      this.pendingUnmute = true;
-      this.showHint(true);
-      return false;
-    }
-
-    let success = false;
-    try {
-      this.player.unMute();
-      this.player.setVolume(100);
-      this.player.playVideo();
-      if (typeof this.player.isMuted === "function") {
-        success = !this.player.isMuted();
-      } else {
-        success = true;
-      }
-    } catch {}
-
-    this.soundUnlocked = success;
-    this.pendingUnmute = !success;
-    this.showHint(!success);
-    return success;
+    this.pendingUnmute = true;
+    this.clearSoundUnlockRetry();
+    this.soundUnlockRetriesRemaining = 5;
+    return this.attemptSoundUnlock();
   }
 
   open(url) {
@@ -200,15 +400,21 @@ export default class TVOverlay {
     this.container.setVisible(true);
     this.container.setActive(true);
     this.dom.setVisible(true);
+    this.ensureDomContainerLayer();
     this.rootEl.style.pointerEvents = "auto";
     this.dim.setInteractive();
     this.container.setDepth(10000);
     this.soundUnlocked = false;
     this.pendingUnmute = false;
-    this.showHint(false);
+    this.loadFailed = false;
+    this.loadRebuildTried = false;
+    this.clearSoundUnlockRetry();
+    this.showHint(true, "Press A for sound");
 
-    this.videoId = this.extractVideoId(url);
+    this.videoId = this.extractVideoId(url) || "hrMlEv-6SEw";
     this.ensurePlayer();
+    this.scheduleLoadWatchdog();
+    this.scheduleLayoutCheck();
   }
 
   close() {
@@ -221,7 +427,16 @@ export default class TVOverlay {
     this.dim.disableInteractive();
     this.soundUnlocked = false;
     this.pendingUnmute = false;
+    this.loadFailed = false;
+    this.loadRebuildTried = false;
+    this.clearSoundUnlockRetry();
+    this.playerIframe = null;
     this.showHint(false);
+    this.clearLoadWatchdog();
+    if (this._layoutCheckRaf) {
+      window.cancelAnimationFrame(this._layoutCheckRaf);
+      this._layoutCheckRaf = null;
+    }
 
     if (this.playerMount) {
       const iframe = this.playerMount.querySelector("iframe");
@@ -239,6 +454,7 @@ export default class TVOverlay {
   }
 
   layout(gameCam) {
+    this.ensureDomContainerLayer();
     const scene = this.scene;
     let vpX = 0;
     let vpY = 0;
@@ -277,6 +493,7 @@ export default class TVOverlay {
 
     this.rootEl.style.width = `${frameW}px`;
     this.rootEl.style.height = `${frameH}px`;
+    if (this.isOpen) this.scheduleLoadWatchdog();
   }
 
   destroy() {
@@ -294,5 +511,11 @@ export default class TVOverlay {
     this.rootEl = null;
     this.playerMount = null;
     this.hintEl = null;
+    this.clearLoadWatchdog();
+    this.clearSoundUnlockRetry();
+    if (this._layoutCheckRaf) {
+      window.cancelAnimationFrame(this._layoutCheckRaf);
+      this._layoutCheckRaf = null;
+    }
   }
 }

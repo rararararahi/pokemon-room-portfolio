@@ -131,7 +131,6 @@ export default class GameMusic {
     return !!(
       this.scene?.tvOverlay?.isOpen ||
       this.scene?.shop?.isOpen ||
-      this.scene?.arcadeOverlay?.isOpen ||
       this.scene?.emailOverlay?.isOpen?.()
     );
   }

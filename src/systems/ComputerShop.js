@@ -1,5 +1,8 @@
 import { deriveBeatId, normalizeShopItems } from "../config/gameConfig";
 
+const FORCED_SOLD_BEAT_ID = "beat20";
+const SOLD_LABEL = "SOLD";
+
 export default class ComputerShop {
   constructor(scene, hooks = {}) {
     this.scene = scene;
@@ -125,6 +128,15 @@ export default class ComputerShop {
     return { pageSize, items };
   }
 
+  isForcedSoldItem(item) {
+    const beatId = String(item?.beatId || item?.id || "").trim().toLowerCase();
+    return beatId === FORCED_SOLD_BEAT_ID;
+  }
+
+  isSoldItem(item) {
+    return !!item?.sold || this.isForcedSoldItem(item);
+  }
+
   runShopSanityCheck() {
     if (this._didSanityCheck) return;
     this._didSanityCheck = true;
@@ -157,6 +169,9 @@ export default class ComputerShop {
       if (!res.ok) throw new Error(`shop.json HTTP ${res.status}`);
       const json = await res.json();
       this.data = this.normalizeLoadedData(json || {});
+      this.data.items = this.data.items.map((item) =>
+        this.isForcedSoldItem(item) ? { ...item, sold: true } : item
+      );
       this.runShopSanityCheck();
       this.page = 0;
       this.index = 0;
@@ -440,23 +455,40 @@ export default class ComputerShop {
     const fontSize = Number.parseInt(this.list.style.fontSize, 10) || 14;
     const approxCharWidth = fontSize * 0.6;
     const cols = anchor ? Math.max(1, Math.floor(anchor.rowW / approxCharWidth)) : 1;
+    const soldLines = [];
+    let hasSoldLine = false;
     for (let i = 0; i < pageItems.length; i++) {
       const it = pageItems[i];
       const cursor = i === this.index ? "▶" : " ";
-      const price = typeof it.price === "number" ? `$${it.price}` : "";
+      const sold = this.isSoldItem(it);
+      const price = !sold && typeof it.price === "number" ? `$${it.price}` : "";
       if (price) {
         const indent = Math.max(1, cols - price.length);
         lines.push(`${cursor} ${it.name}\n${" ".repeat(indent)}${price}`);
+        soldLines.push("", "");
       } else {
-        lines.push(`${cursor} ${it.name}`);
+        lines.push(`${cursor} ${it.name}\n`);
+        if (sold) {
+          hasSoldLine = true;
+          const indent = Math.max(1, cols - SOLD_LABEL.length);
+          soldLines.push(`${" ".repeat(indent)}${SOLD_LABEL}`, "");
+        } else {
+          soldLines.push("", "");
+        }
       }
     }
     if (!pageItems.length) lines.push("  (No items)");
 
     this.list.setText(lines.join("\n"));
     if (this.priceList) {
-      this.priceList.setText("");
-      this.priceList.setVisible(false);
+      if (hasSoldLine) {
+        this.priceList.setColor("#b00020");
+        this.priceList.setText(soldLines.join("\n"));
+        this.priceList.setVisible(true);
+      } else {
+        this.priceList.setText("");
+        this.priceList.setVisible(false);
+      }
     }
     this.updateRowHits(pageItems.length);
     this.updateSelectionHighlight(pageItems.length);
@@ -552,7 +584,8 @@ export default class ComputerShop {
   }
 
   confirmOpen() {
-    if (!this.selectedItem()) return;
+    const item = this.selectedItem();
+    if (!item || this.isSoldItem(item)) return;
     this.mode = "confirm";
     this.confirmChoice = 0;
     this.render();

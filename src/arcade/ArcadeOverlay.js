@@ -4,8 +4,8 @@ import Pong from "./games/Pong";
 import Tetris from "./games/Tetris";
 import Flappy from "./games/Flappy";
 import BlackjackMini from "./games/BlackjackMini";
+import BrickBreaker from "./games/BrickBreaker";
 import { createArcadeHud } from "./ArcadeHud";
-import { frameTextPanel } from "./TextFrame";
 import {
   getArcadeProfile,
   getNicknameConstraints,
@@ -18,10 +18,15 @@ const ARCADE_GAMES = [
   { id: "pong", label: "PONG", createGame: () => new Pong() },
   { id: "tetris", label: "TETRIS", createGame: () => new Tetris() },
   { id: "flappy", label: "FLAPPY", createGame: () => new Flappy() },
+  { id: "brickbreaker", label: "BRICK BREAKER", createGame: () => new BrickBreaker() },
   { id: "blackjack", label: "BLACKJACK", createGame: () => new BlackjackMini() },
 ];
 
 const MENU_ENTRIES = ARCADE_GAMES;
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
 
 export default class ArcadeOverlay {
   constructor(scene, hooks = {}) {
@@ -109,18 +114,18 @@ export default class ArcadeOverlay {
 
     this.list = scene.add.text(0, 0, "", {
       fontFamily: "monospace",
-      fontSize: "12px",
+      fontSize: "14px",
       color: "#111111",
-      lineSpacing: 7,
+      lineSpacing: 8,
     }).setOrigin(0, 0);
 
     this.menuHiScoreBorder = scene.add.rectangle(0, 0, 10, 10, 0x111111, 0.9).setOrigin(0, 0);
     this.menuHiScoreFill = scene.add.rectangle(0, 0, 10, 10, 0xffffff, 0.86).setOrigin(0, 0);
     this.menuHiScoreText = scene.add.text(0, 0, "", {
       fontFamily: "monospace",
-      fontSize: "9px",
+      fontSize: "12px",
       color: "#111111",
-      lineSpacing: 3,
+      lineSpacing: 5,
     }).setOrigin(0, 0);
 
     this.hint = scene.add.text(0, 0, "", {
@@ -176,6 +181,12 @@ export default class ArcadeOverlay {
     ]);
 
     this.runner = new ArcadeGameRunner(scene, this.panelWrap);
+    this.runner.onLeaderboardChanged = (gameId) => {
+      const selectedId = this.selectedEntry?.id || "";
+      if (this.mode === "game") return;
+      if (gameId && selectedId && gameId !== selectedId) return;
+      this.render();
+    };
 
     this.container.add([this.dim, this.panelWrap]);
 
@@ -255,6 +266,8 @@ export default class ArcadeOverlay {
         return;
       }
     }
+
+    this.runner.requestLeaderboard(this.selectedGame?.id || "", { force: false });
 
     if (this.panelTween) {
       this.panelTween.stop();
@@ -466,23 +479,52 @@ export default class ArcadeOverlay {
         height: viewportRect.height,
       };
     } else {
-      const listX = innerX + 2;
-      const listW = Math.max(84, Math.round(innerW * 0.36));
-      this.list.setPosition(listX, infoY + 4);
-      this.list.setWordWrapWidth(listW);
-
-      const menuGap = 10;
+      const contentX = innerX + 2;
+      const contentY = infoY + 4;
+      const contentW = Math.max(120, innerW - 2);
+      const menuGap = 8;
+      const leftPreferred = Math.round(contentW * 0.38);
+      const leftMaxBySpace = Math.max(120, contentW - menuGap - 140);
+      const listW = clamp(leftPreferred, 120, Math.min(182, leftMaxBySpace));
+      const listX = contentX;
       const menuX = listX + listW + menuGap;
-      const menuW = Math.max(96, innerW - listW - menuGap);
-      const menuY = infoY + 4;
+      const menuW = Math.max(96, contentX + contentW - menuX);
+      const menuY = contentY;
+
+      this.list.setPosition(listX, contentY);
+      this.list.setWordWrapWidth(0, false);
+
+      const textPadX = 12;
+      const textPadY = 10;
+      const borderPad = 1;
+      const fontPx = Number.parseInt(String(this.menuHiScoreText.style.fontSize || "12"), 10) || 12;
+      const lineSpacing = Number.isFinite(this.menuHiScoreText.lineSpacing) ? this.menuHiScoreText.lineSpacing : 0;
+      const lineHeight = fontPx + lineSpacing;
+      const fixedLines = 7; // GAME + HiScore + Top 5
+      const safeMinX = menuX + 2;
+      const safeMaxX = menuX + menuW - 2;
+      const safeMinY = menuY + 2;
+      const safeMaxY = hintY - 6;
+      const availableH = Math.max(44, safeMaxY - safeMinY);
+      const desiredPanelW = clamp(Math.floor(menuW * 0.98), 150, 220);
+      const panelW = Math.max(72, Math.min(desiredPanelW, safeMaxX - safeMinX));
+      const panelH = Math.max(44, Math.min(textPadY * 2 + fixedLines * lineHeight, availableH));
+      const panelX = safeMaxX - panelW;
+      const panelY = safeMinY;
+
+      this.menuHiScoreFill.setPosition(panelX, panelY);
+      this.menuHiScoreFill.setSize(panelW, panelH);
+      this.menuHiScoreBorder.setPosition(panelX - borderPad, panelY - borderPad);
+      this.menuHiScoreBorder.setSize(panelW + borderPad * 2, panelH + borderPad * 2);
+
       this.menuHiScoreAnchor = {
-        x: menuX + 4,
-        y: menuY + 2,
-        maxW: Math.max(24, menuW - 8),
-        maxBottomY: hintY - 6,
+        x: panelX + textPadX,
+        y: panelY + textPadY,
+        maxW: Math.max(24, panelW - textPadX * 2),
+        lineMaxChars: Math.max(8, Math.floor((panelW - textPadX * 2) / Math.max(5, Math.round(fontPx * 0.6)))),
       };
       this.menuHiScoreText.setPosition(this.menuHiScoreAnchor.x, this.menuHiScoreAnchor.y);
-      this.menuHiScoreText.setWordWrapWidth(this.menuHiScoreAnchor.maxW, true);
+      this.menuHiScoreText.setWordWrapWidth(0, false);
 
       this.gameScreenRect = null;
       this.gameChromeRect = null;
@@ -619,12 +661,39 @@ export default class ArcadeOverlay {
   }
 
   formatMenuHiScoreLine(entry, rank) {
-    if (!entry) return `${rank}. --- 0`;
+    if (!entry) return `${rank}. ---- 0`;
     const name = String(entry.nickname || "---")
       .toUpperCase()
       .slice(0, 8);
     const score = Math.max(0, Math.floor(Number(entry.score) || 0));
     return `${rank}. ${name} ${score}`;
+  }
+
+  truncateMenuLine(line, maxChars) {
+    const safe = String(line || "");
+    if (!Number.isFinite(maxChars) || maxChars <= 3) return safe.slice(0, Math.max(1, maxChars || 1));
+    if (safe.length <= maxChars) return safe;
+    return `${safe.slice(0, maxChars - 3)}...`;
+  }
+
+  formatMenuScoreRow(rank, nickname, score, maxChars) {
+    const safeMaxChars = Math.max(6, Math.floor(Number(maxChars) || 0));
+    const rankPrefix = `${Math.max(1, Math.floor(Number(rank) || 0))}. `;
+    const scoreText = String(Math.max(0, Math.floor(Number(score) || 0)));
+    const reserved = rankPrefix.length + 1 + scoreText.length;
+    if (reserved >= safeMaxChars) return `${rankPrefix.trim()} ${scoreText}`;
+    const availableNameChars = safeMaxChars - reserved;
+    const rawName = String(nickname || "----")
+      .toUpperCase()
+      .replace(/[^A-Z0-9_]/g, "");
+    const safeName = this.truncateMenuLine(rawName || "----", availableNameChars).padEnd(availableNameChars, " ");
+    return `${rankPrefix}${safeName} ${scoreText}`;
+  }
+
+  formatMenuGameLabel(label, maxChars = 12) {
+    const safe = String(label || "-").toUpperCase();
+    if (safe.length <= maxChars) return safe;
+    return `${safe.slice(0, Math.max(1, maxChars - 3))}...`;
   }
 
   updateMenuHiScorePanel() {
@@ -637,23 +706,22 @@ export default class ArcadeOverlay {
     }
 
     this.menuHiScoreText.setPosition(this.menuHiScoreAnchor.x, this.menuHiScoreAnchor.y);
-    this.menuHiScoreText.setWordWrapWidth(this.menuHiScoreAnchor.maxW, true);
+    this.menuHiScoreText.setWordWrapWidth(0, false);
     const leaderboard = this.runner.getLeaderboard(entry?.id || "");
-    const lines = [`GAME: ${entry?.label || "-"}`, "HiScore"];
-    const availableHeight = Math.max(0, (this.menuHiScoreAnchor.maxBottomY || 0) - this.menuHiScoreAnchor.y);
-    const maxLines = Math.max(3, Math.floor(availableHeight / 12));
-    const maxScores = Math.max(1, Math.min(5, maxLines - 2));
-    for (let rank = 0; rank < maxScores; rank += 1) {
-      lines.push(this.formatMenuHiScoreLine(leaderboard[rank], rank + 1));
+    const source = this.runner.getLeaderboardSource(entry?.id || "");
+    const lineMaxChars = Math.max(8, Math.floor(Number(this.menuHiScoreAnchor.lineMaxChars) || 8));
+    const gameLabelChars = Math.max(3, lineMaxChars - 6);
+    const lines = [
+      this.truncateMenuLine(`GAME: ${this.formatMenuGameLabel(entry?.label || "-", gameLabelChars)}`, lineMaxChars),
+      this.truncateMenuLine(source === "local" ? "HiScore LOCAL" : "HiScore", lineMaxChars),
+    ];
+    for (let rank = 0; rank < 5; rank += 1) {
+      const row = leaderboard[rank] || null;
+      lines.push(
+        this.formatMenuScoreRow(rank + 1, row?.nickname || "----", row?.score || 0, lineMaxChars)
+      );
     }
     this.menuHiScoreText.setText(lines.join("\n"));
-    frameTextPanel(this.menuHiScoreText, this.menuHiScoreFill, this.menuHiScoreBorder, {
-      textX: this.menuHiScoreAnchor.x,
-      textY: this.menuHiScoreAnchor.y,
-      padX: 5,
-      padY: 3,
-      borderPad: 1,
-    });
   }
 
   updateMenuList() {
@@ -814,6 +882,7 @@ export default class ArcadeOverlay {
     const next = Math.max(0, Math.min(MENU_ENTRIES.length - 1, this.selectedIndex + delta));
     if (next === this.selectedIndex) return;
     this.selectedIndex = next;
+    this.runner.requestLeaderboard(this.selectedGame?.id || "", { force: false });
     this.render();
   }
 

@@ -187,6 +187,9 @@ export default class BlackjackMini {
   finishRound(outcome, line) {
     if (outcome === "win") {
       this.wins += 1;
+      if (this.roundDoubled && this.extraLifePaid) {
+        this.wins += 1;
+      }
       this.lives += 1;
       if (this.roundDoubled && this.extraLifePaid) {
         this.lives += 1;

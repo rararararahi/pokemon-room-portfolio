@@ -11,6 +11,7 @@ export default class Flappy {
 
     this.bird = null;
     this.message = null;
+    this.scoreText = null;
 
     this.pipes = [];
 
@@ -18,11 +19,15 @@ export default class Flappy {
     this.birdY = 0;
     this.birdVy = 0;
 
-    this.gravity = 315;
-    this.jumpVelocity = -158;
-    this.pipeSpeed = 74;
-    this.pipeGap = 43;
-    this.pipeSpawnEvery = 1.32;
+    // Tuning: faster pace, forgiving early gaps, smoother fall recovery.
+    this.gravity = 262;
+    this.jumpVelocity = -168;
+    this.maxFallSpeed = 210;
+    this.pipeSpeed = 96;
+    this.maxPipeGap = 0;
+    this.minPipeGap = 0;
+    this.gapDecayPerPipe = 0;
+    this.pipeSpawnEvery = 1.26;
     this.pipeTimer = 0;
     this.pipeWidth = 12;
 
@@ -54,8 +59,13 @@ export default class Flappy {
       color: "#f4f6ff",
       align: "center",
     }).setOrigin(0.5, 0.5);
+    this.scoreText = scene.add.text(6, 5, "SCORE: 0", {
+      fontFamily: "monospace",
+      fontSize: "10px",
+      color: "#f4f6ff",
+    }).setOrigin(0, 0);
 
-    this.root.add([topLine, bottomLine, this.bird, this.message]);
+    this.root.add([topLine, bottomLine, this.bird, this.message, this.scoreText]);
 
     this.reset();
   }
@@ -75,18 +85,35 @@ export default class Flappy {
     this.state = "play";
     this.pipeTimer = 0;
     this.lastTickAt = 0;
+    this.maxPipeGap = Phaser.Math.Clamp(Math.round(this.height * 0.58), 50, 72);
+    this.minPipeGap = Phaser.Math.Clamp(Math.round(this.height * 0.42), 40, this.maxPipeGap - 6);
+    this.gapDecayPerPipe = 1.35;
     this.message.setText("");
+    this.scoreText.setText("SCORE: 0");
 
     this.bird.setPosition(this.birdX, this.birdY);
   }
 
-  spawnPipe() {
-    const minGapCenter = 20;
-    const maxGapCenter = this.height - 20;
-    const gapCenter = Phaser.Math.Between(minGapCenter, maxGapCenter);
+  getPipeGapForScore(score) {
+    const safeScore = Math.max(0, Math.floor(Number(score) || 0));
+    const rampScore = Math.max(0, safeScore - 2);
+    const gap = this.maxPipeGap - rampScore * this.gapDecayPerPipe;
+    return Phaser.Math.Clamp(Math.round(gap), this.minPipeGap, this.maxPipeGap);
+  }
 
-    const topH = Math.max(8, Math.round(gapCenter - this.pipeGap / 2));
-    const bottomY = Math.round(gapCenter + this.pipeGap / 2);
+  spawnPipe() {
+    const gap = this.getPipeGapForScore(this.score);
+    const gapHalf = gap / 2;
+    const edgeMargin = 12;
+    const minGapCenter = Math.round(edgeMargin + gapHalf);
+    const maxGapCenter = Math.round(this.height - edgeMargin - gapHalf);
+    const gapCenter =
+      maxGapCenter > minGapCenter
+        ? Phaser.Math.Between(minGapCenter, maxGapCenter)
+        : Math.round(this.height / 2);
+
+    const topH = Math.max(8, Math.round(gapCenter - gapHalf));
+    const bottomY = Math.round(gapCenter + gapHalf);
     const bottomH = Math.max(8, this.height - bottomY);
 
     const x = this.width + this.pipeWidth;
@@ -155,6 +182,7 @@ export default class Flappy {
     }
 
     this.birdVy += this.gravity * seconds;
+    this.birdVy = Math.min(this.maxFallSpeed, this.birdVy);
     this.birdY += this.birdVy * seconds;
     this.bird.setPosition(Math.round(this.birdX), Math.round(this.birdY));
 
@@ -179,6 +207,7 @@ export default class Flappy {
       if (!pipe.passed && pipe.x + this.pipeWidth / 2 < this.birdX) {
         pipe.passed = true;
         this.score += 1;
+        this.scoreText.setText(`SCORE: ${this.score}`);
       }
 
       if (this.collidePipe(pipe)) {
@@ -204,6 +233,7 @@ export default class Flappy {
     this.root = null;
     this.bird = null;
     this.message = null;
+    this.scoreText = null;
     this.pipes = [];
   }
 }

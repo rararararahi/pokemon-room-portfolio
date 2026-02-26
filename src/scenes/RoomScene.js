@@ -60,6 +60,7 @@ class RoomScene extends Phaser.Scene {
     this.load.image("ui_dpad", "/assets/ui/dpad.png");
     this.load.image("ui_a", "/assets/ui/abutton.png");
     this.load.image("ui_b", "/assets/ui/bbutton.png");
+    this.load.audio("ui_click", "/sfx/ui_click1.mp3");
     this.load.image("ui_bezel", "/assets/ui/screen_bezel.png");
     this.load.image("ui_deck", "/assets/ui/bottom_deck.png");
     this.load.image("door_rug", "/assets/ui/turkish_rug.png");
@@ -86,6 +87,28 @@ class RoomScene extends Phaser.Scene {
     const pageSize = Number.isFinite(shopData?.pageSize) ? shopData.pageSize : 5;
     const items = normalizeShopItems(shopData?.items || [], pageSize);
     return items.filter((item) => !this.isCoffeeItem(item));
+  }
+
+  withBeat20ShowcasePurchase(purchases) {
+    const list = Array.isArray(purchases) ? [...purchases] : [];
+    const hasBeat20 = list.some((entry) => String(entry?.beatId || "").trim().toLowerCase() === "beat20");
+    if (hasBeat20) return list;
+
+    const beatItems = this.getPurchasableBeatItems();
+    const beat20Index = beatItems.findIndex(
+      (item) => String(item?.beatId || item?.id || "").trim().toLowerCase() === "beat20"
+    );
+    if (beat20Index < 0 || list[beat20Index]) return list;
+
+    list[beat20Index] = {
+      purchaseId: "showcase_beat20_eva",
+      beatId: "beat20",
+      beatName: "Beat20",
+      buyerName: "Eva",
+      buyerEmail: "eva@example.com",
+      createdAt: "2026-02-18T00:00:00.000Z",
+    };
+    return list;
   }
 
   readLocalIdentity() {
@@ -214,19 +237,36 @@ class RoomScene extends Phaser.Scene {
     this.touch.down = dir === "down";
   }
 
-  tryPlayArcadeInteractSfx() {
-    const sound = this.sound;
-    if (!sound) return;
-    const candidates = ["ui_blip", "ui_click", "click", "confirm", "sfx_ui"];
-    for (let i = 0; i < candidates.length; i += 1) {
-      const key = candidates[i];
-      const loaded = !!sound.get?.(key) || !!this.cache?.audio?.exists?.(key);
-      if (!loaded) continue;
-      try {
-        sound.play(key, { volume: 0.45 });
-      } catch {}
-      return;
+  ensureUiClickSfx() {
+    if (this.uiClickSfx) return this.uiClickSfx;
+    if (!this.sound || !this.cache?.audio?.exists?.("ui_click")) return null;
+    try {
+      this.uiClickSfx = this.sound.add("ui_click", { volume: 0.16 });
+    } catch {
+      this.uiClickSfx = null;
     }
+    return this.uiClickSfx;
+  }
+
+  tryPlayUiClickSfx(now = 0) {
+    if (!this._warmupHasUserGesture) return;
+    if (Number.isFinite(now) && Number.isFinite(this.lastUiClickAt) && now - this.lastUiClickAt < 70) return;
+    const sfx = this.ensureUiClickSfx();
+    if (!sfx) return;
+    if (Number.isFinite(now)) this.lastUiClickAt = now;
+    try {
+      if (this.sound?.context?.state === "suspended") {
+        const resumeResult = this.sound.context.resume();
+        if (resumeResult && typeof resumeResult.catch === "function") resumeResult.catch(() => {});
+      }
+    } catch {}
+    try {
+      sfx.play({ volume: 0.16 });
+    } catch {}
+  }
+
+  tryPlayArcadeInteractSfx() {
+    this.tryPlayUiClickSfx(this.time?.now ?? 0);
   }
 
   clearArcadeHumMessage() {
@@ -426,11 +466,21 @@ class RoomScene extends Phaser.Scene {
     return counts;
   }
 
-  addInteractable({ id, sprite, text, getInteractRect, meta }) {
+  addInteractable({ id, sprite, text, getInteractRect, getFrontInteractRect, frontFacing, meta }) {
     const base = sprite.blocker ? sprite.blocker.getBottomCenter() : sprite.getBottomCenter();
     const interactPointX = Math.round(base.x);
     const interactPointY = Math.round(base.y + 6);
-    const entry = { id, sprite, text, interactPointX, interactPointY, getInteractRect, meta };
+    const entry = {
+      id,
+      sprite,
+      text,
+      interactPointX,
+      interactPointY,
+      getInteractRect,
+      getFrontInteractRect,
+      frontFacing,
+      meta,
+    };
     this.interactables.push(entry);
     return entry;
   }
@@ -527,6 +577,7 @@ class RoomScene extends Phaser.Scene {
     this.isSceneTransitioning = true;
     this.isTransitioning = true;
     this.lastTransitionAt = now;
+    this.pendingSceneKey = toScene;
 
     try {
       this.resetInputState();
@@ -539,6 +590,7 @@ class RoomScene extends Phaser.Scene {
     } catch (err) {
       this.isSceneTransitioning = false;
       this.isTransitioning = false;
+      this.pendingSceneKey = null;
       this.showTransitionError(err, toScene);
     }
   }
@@ -632,6 +684,26 @@ class RoomScene extends Phaser.Scene {
     this.input.on("pointerdown", this._onMusicGesture);
     this.input.keyboard?.on("keydown", this._onMusicGesture);
 
+    this._onUiClickKeydown = (event) => {
+      if (this.uiModalOpen) return;
+      if (event?.repeat) return;
+      const code = String(event?.code || "");
+      if (
+        code === "ArrowLeft" ||
+        code === "ArrowRight" ||
+        code === "ArrowUp" ||
+        code === "ArrowDown" ||
+        code === "KeyA" ||
+        code === "KeyB" ||
+        code === "Space" ||
+        code === "Escape"
+      ) {
+        this._warmupHasUserGesture = true;
+        this.tryPlayUiClickSfx(this.time?.now ?? 0);
+      }
+    };
+    this.input.keyboard?.on("keydown", this._onUiClickKeydown);
+
     this._onScaleResize = () => this.layout();
     this.scale.on("resize", this._onScaleResize);
   }
@@ -650,16 +722,20 @@ class RoomScene extends Phaser.Scene {
       this.input.keyboard?.off("keydown", this._onMusicGesture);
       this._onMusicGesture = null;
     }
+    if (this._onUiClickKeydown) {
+      this.input.keyboard?.off("keydown", this._onUiClickKeydown);
+      this._onUiClickKeydown = null;
+    }
     if (this._onScaleResize) {
       this.scale.off("resize", this._onScaleResize);
       this._onScaleResize = null;
     }
   }
 
-  destroySystems() {
+  destroySystems({ preserveGameMusic = false } = {}) {
     this.shop?.destroy?.();
     this.tvOverlay?.destroy?.();
-    this.gameMusic?.destroy?.();
+    if (!preserveGameMusic) this.gameMusic?.destroy?.();
     this.emailOverlay?.destroy?.();
     this.arcadeOverlay?.destroy?.();
     this.shop = null;
@@ -690,7 +766,10 @@ class RoomScene extends Phaser.Scene {
     this.dialogContainer = null;
     this.dialogBorder = null;
     this.dialogFill = null;
+    this.dialogTitleText = null;
     this.dialogText = null;
+    this.dialogLayout = null;
+    this.dialogVariant = "default";
     this.wrapProbeText = null;
     this.interactProbe = null;
     this.interactCandidateOutline = null;
@@ -704,6 +783,8 @@ class RoomScene extends Phaser.Scene {
   }
 
   destroyUiObjects() {
+    this.safeDestroyObject(this.uiClickSfx);
+    this.uiClickSfx = null;
     this.safeDestroyObject(this.wrapProbeText);
     this.safeDestroyObject(this.dialogContainer);
     this.safeDestroyObject(this.dpadVisual);
@@ -736,6 +817,17 @@ class RoomScene extends Phaser.Scene {
     this.dialogContainer = this.add.container(0, 0);
     this.dialogBorder = this.add.rectangle(0, 0, 10, 10, 0x111111).setOrigin(0, 0);
     this.dialogFill = this.add.rectangle(0, 0, 10, 10, 0xffffff).setOrigin(0, 0);
+    this.dialogTitleText = this.add.text(0, 0, "", {
+      fontFamily: "monospace",
+      fontSize: "15px",
+      fontStyle: "bold",
+      color: "#111111",
+      align: "center",
+      lineSpacing: 1,
+      wordWrap: { width: 100 },
+    });
+    this.dialogTitleText.setStroke("#111111", 1);
+    this.dialogTitleText.setVisible(false);
     this.dialogText = this.add.text(0, 0, "", {
       fontFamily: "monospace",
       fontSize: "14px",
@@ -743,7 +835,7 @@ class RoomScene extends Phaser.Scene {
       lineSpacing: 2,
       wordWrap: { width: 100 },
     });
-    this.dialogContainer.add([this.dialogBorder, this.dialogFill, this.dialogText]);
+    this.dialogContainer.add([this.dialogBorder, this.dialogFill, this.dialogTitleText, this.dialogText]);
     this.dialogContainer.setVisible(false);
     this.uiLayer.add(this.dialogContainer);
   }
@@ -755,7 +847,10 @@ class RoomScene extends Phaser.Scene {
     this.dialogContainer = null;
     this.dialogBorder = null;
     this.dialogFill = null;
+    this.dialogTitleText = null;
     this.dialogText = null;
+    this.dialogLayout = null;
+    this.dialogVariant = "default";
   }
 
   ensureDialogUiAlive() {
@@ -763,6 +858,7 @@ class RoomScene extends Phaser.Scene {
       this.isValidDisplayObject(this.dialogContainer) &&
       this.isValidShape(this.dialogBorder) &&
       this.isValidShape(this.dialogFill) &&
+      this.isValidDisplayObject(this.dialogTitleText) &&
       this.isValidDisplayObject(this.dialogText)
     ) {
       return true;
@@ -777,6 +873,7 @@ class RoomScene extends Phaser.Scene {
       this.isValidDisplayObject(this.dialogContainer) &&
       this.isValidShape(this.dialogBorder) &&
       this.isValidShape(this.dialogFill) &&
+      this.isValidDisplayObject(this.dialogTitleText) &&
       this.isValidDisplayObject(this.dialogText)
     );
   }
@@ -804,7 +901,11 @@ class RoomScene extends Phaser.Scene {
     this.detachControlInputListeners();
     this.resetInputState();
     this.clearRunHoldTimer();
-    this.destroySystems();
+    const preserveGameMusic =
+      !!this.gameMusic && (this.pendingSceneKey === "room" || this.pendingSceneKey === "trophy");
+    if (preserveGameMusic) this.game?.registry?.set("sharedGameMusic", this.gameMusic);
+    else this.game?.registry?.remove("sharedGameMusic");
+    this.destroySystems({ preserveGameMusic });
     this.destroyUiObjects();
     if (this.layoutSettleTimer) {
       this.layoutSettleTimer.remove(false);
@@ -822,6 +923,7 @@ class RoomScene extends Phaser.Scene {
     this.isTransitioning = false;
     this.lastTransitionAt = 0;
     this.transitionCooldownMs = 400;
+    this.pendingSceneKey = null;
     this.transitionFailed = false;
     this.transitionErrorUi = null;
     this.layoutSettleTimer = null;
@@ -829,6 +931,12 @@ class RoomScene extends Phaser.Scene {
     this.worldLayer = this.add.container(0, 0);
     this.uiLayer = this.add.container(0, 0);
     this.remoteState = new RemoteState();
+    const sharedGameMusic = this.game?.registry?.get("sharedGameMusic") || null;
+    this.gameMusic = sharedGameMusic;
+    if (this.gameMusic) {
+      this.game?.registry?.remove("sharedGameMusic");
+      this.gameMusic.scene = this;
+    }
     this.localIdentity = this.readLocalIdentity();
     this.identitySubmitted = !!(this.localIdentity?.name && this.localIdentity?.email);
     this.shopOpenedAt = 0;
@@ -837,9 +945,13 @@ class RoomScene extends Phaser.Scene {
     this.uiModalOpen = false;
     this.arcadeTouchAJust = false;
     this.arcadeTouchBJust = false;
+    this.uiClickSfx = null;
+    this.lastUiClickAt = 0;
     this.arcadeOpenPending = false;
     this.arcadeOpenTimer = null;
     this.arcadeHumMessageUi = null;
+    this.deferMusicResumeFrames = 0;
+    this._tvWasOpenLastFrame = false;
     this._isCoarsePointer =
       typeof window !== "undefined" &&
       typeof window.matchMedia === "function" &&
@@ -1044,14 +1156,17 @@ class RoomScene extends Phaser.Scene {
       this.uiLayer.add(this.arcadeOverlay.container);
       this.arcadeOverlay.layout(this.gameCam);
 
-      this.gameMusic = new GameMusic(this);
-      this.gameMusic.load().then(() => {
-        this.gameMusic.startOnLoad();
-      });
+      if (!this.gameMusic) {
+        this.gameMusic = new GameMusic(this);
+        this.gameMusic.load().then(() => {
+          this.gameMusic.startOnLoad();
+        });
+      } else {
+        this.gameMusic.scene = this;
+      }
     } else {
       this.shop = null;
       this.tvOverlay = null;
-      this.gameMusic = null;
       this.emailOverlay = null;
       this.arcadeOverlay = null;
       this.trophyPollTimer = this.time.addEvent({
@@ -1374,7 +1489,7 @@ class RoomScene extends Phaser.Scene {
       this.worldLayer.add([shaft, cap, accent]);
       const blocker = this.makeBlocker(shaft, 0.9, 8);
 
-      const trophy = this.add.container(x, y - 24);
+      const trophy = this.add.container(x, y - 30);
       const cup = this.add.rectangle(0, 0, 10, 7, 0xf2c94c);
       const stem = this.add.rectangle(0, 5, 3, 5, 0xe7b93a);
       const base = this.add.rectangle(0, 9, 10, 3, 0x77522b);
@@ -1389,6 +1504,8 @@ class RoomScene extends Phaser.Scene {
         sprite: shaft,
         text: "An empty pedestal...",
         getInteractRect: () => new Phaser.Geom.Rectangle(x - 12, y - 26, 24, 26),
+        getFrontInteractRect: () => new Phaser.Geom.Rectangle(x - 13, y + 1, 26, 12),
+        frontFacing: "up",
         meta: { pillarIndex: i },
       });
 
@@ -1417,7 +1534,7 @@ class RoomScene extends Phaser.Scene {
     if (!this.isTrophyRoom()) return;
     const state = await this.remoteState.getState();
     const purchases = Array.isArray(state?.purchases) ? state.purchases : [];
-    this.trophyPurchases = purchases;
+    this.trophyPurchases = this.withBeat20ShowcasePurchase(purchases);
     this.applyTrophiesToPillars();
   }
 
@@ -1473,6 +1590,7 @@ class RoomScene extends Phaser.Scene {
     this.aPointerId = null;
     this.bPointerId = null;
     const pressBButton = (now) => {
+      this.tryPlayUiClickSfx(now);
       if (this.uiModalOpen) {
         this.emailOverlay.close();
         this.resetInputState();
@@ -1493,7 +1611,7 @@ class RoomScene extends Phaser.Scene {
 
       // TV: B closes
       if (this.tvOverlay?.isOpen) {
-        this.tvOverlay.close();
+        this.closeTvOverlayWithResumeDelay();
         return;
       }
 
@@ -1577,6 +1695,7 @@ class RoomScene extends Phaser.Scene {
         return;
       }
       if (nextDir !== this.dpadLockDir) {
+        this.tryPlayUiClickSfx(now);
         this.setDpadTouchDirection(nextDir, now);
         return;
       }
@@ -1585,6 +1704,7 @@ class RoomScene extends Phaser.Scene {
 
     const startAButton = (now) => {
       if (this.uiModalOpen) return;
+      this.tryPlayUiClickSfx(now);
 
       // Arcade: A action/select.
       if (this.arcadeOverlay?.isOpen) {
@@ -1594,8 +1714,7 @@ class RoomScene extends Phaser.Scene {
 
       // If an overlay is open, A behaves as action (not run).
       if (this.tvOverlay?.isOpen) {
-        if (!this.tvOverlay.soundUnlocked) this.tvOverlay.enableSoundFromGesture();
-        else this.tvOverlay.close();
+        this.closeTvOverlayWithResumeDelay();
         return;
       }
 
@@ -1767,11 +1886,14 @@ class RoomScene extends Phaser.Scene {
       typeof window.matchMedia === "function" &&
       window.matchMedia("(pointer: coarse)").matches;
     const coarseMult = isCoarsePointer ? 1.25 : 1;
+    const coarseAbMult = isCoarsePointer ? 1.07 : 1;
     const rawRadius = Math.round(baseDpadRadius * coarseMult);
     const maxRadius = Math.round(Phaser.Math.Clamp(deckHeight * 0.36, 98, 118));
     const dpadRadius = Phaser.Math.Clamp(rawRadius, 0, maxRadius);
-    const aVisualRadius = Math.round(Phaser.Math.Clamp(deckHeight * 0.18, 30, 42) * scaleDown);
-    const aHitRadius = Math.round(Phaser.Math.Clamp(aVisualRadius * 1.8, 58, 76) * scaleDown);
+    const aVisualBase = Math.round(Phaser.Math.Clamp(deckHeight * 0.18, 30, 42) * scaleDown);
+    const aHitBase = Math.round(Phaser.Math.Clamp(aVisualBase * 1.8, 58, 76) * scaleDown);
+    const aVisualRadius = Math.round(aVisualBase * coarseAbMult);
+    const aHitRadius = Math.round(aHitBase * coarseAbMult);
     const bVisualRadius = aVisualRadius;
     const bHitRadius = aHitRadius;
     return { dpadRadius, aVisualRadius, aHitRadius, bVisualRadius, bHitRadius };
@@ -1799,6 +1921,34 @@ class RoomScene extends Phaser.Scene {
     if (this.isValidShape(dpad)) dpad.setRadius(metrics.dpadRadius);
     if (this.isValidShape(a)) a.setRadius(metrics.aHitRadius);
     if (this.isValidShape(b)) b.setRadius(metrics.bHitRadius);
+  }
+
+  applyDialogTextLayout() {
+    if (!this.dialogLayout || !this.isValidDisplayObject(this.dialogText)) return;
+    const { textX, textY, textW, centerX } = this.dialogLayout;
+    if (this.dialogVariant === "trophy_purchase") {
+      if (this.isValidDisplayObject(this.dialogTitleText)) {
+        this.dialogTitleText.setOrigin(0.5, 0);
+        this.dialogTitleText.setAlign("center");
+        this.dialogTitleText.setPosition(centerX, textY);
+        this.dialogTitleText.setWordWrapWidth(textW);
+        this.dialogTitleText.setVisible(!!this.dialogTitleText.text);
+      }
+      this.dialogText.setOrigin(0.5, 0);
+      this.dialogText.setAlign("center");
+      this.dialogText.setPosition(centerX, textY + 20);
+      this.dialogText.setWordWrapWidth(textW);
+      return;
+    }
+
+    if (this.isValidDisplayObject(this.dialogTitleText)) {
+      this.dialogTitleText.setVisible(false);
+      this.dialogTitleText.setText("");
+    }
+    this.dialogText.setOrigin(0, 0);
+    this.dialogText.setAlign("left");
+    this.dialogText.setPosition(textX, textY);
+    this.dialogText.setWordWrapWidth(textW);
   }
 
   layout() {
@@ -1865,10 +2015,13 @@ class RoomScene extends Phaser.Scene {
       const textX = boxX + border + pad;
       const textY = boxY + border + pad + 1;
       const textW = Math.max(4, boxW - 2 * (border + pad));
-      if (this.isValidDisplayObject(this.dialogText)) {
-        this.dialogText.setPosition(textX, textY);
-        this.dialogText.setWordWrapWidth(textW);
-      }
+      this.dialogLayout = {
+        textX,
+        textY,
+        textW,
+        centerX: Math.round(boxX + boxW / 2),
+      };
+      this.applyDialogTextLayout();
       this.dialogSlideOffsetY = Math.max(0, vpY + vpH - boxY + 4);
     }
 
@@ -1958,6 +2111,10 @@ class RoomScene extends Phaser.Scene {
 
   updateInteractCandidate(now) {
     const feet = this.player.getBottomCenter();
+    const body = this.player.body;
+    const feetRect = body
+      ? new Phaser.Geom.Rectangle(body.x, body.y, body.width, body.height)
+      : new Phaser.Geom.Rectangle(feet.x, feet.y, 1, 1);
     const FACE_OFFSET = 12;
     let fx = feet.x;
     let fy = feet.y;
@@ -1982,29 +2139,44 @@ class RoomScene extends Phaser.Scene {
     const MAX_INTERACT_DIST = 20;
     const MAX_DIST_SQ = MAX_INTERACT_DIST * MAX_INTERACT_DIST;
     const FRONT_TOL = -4;
+
     for (const entry of this.interactables) {
-      if (entry.getInteractRect) {
-        const rect = entry.getInteractRect();
-        const body = this.player.body;
-        const feetRect = body
-          ? new Phaser.Geom.Rectangle(body.x, body.y, body.width, body.height)
-          : new Phaser.Geom.Rectangle(feet.x, feet.y, 1, 1);
-        if (rect && Phaser.Geom.Rectangle.Overlaps(rect, feetRect)) {
-          bestCandidate = entry;
-          bestDistSq = 0;
-        }
-        continue;
-      }
-      const vx = entry.interactPointX - feet.x;
-      const vy = entry.interactPointY - feet.y;
-      const dot = vx * faceX + vy * faceY;
-      if (dot < FRONT_TOL) continue;
-      const dx = entry.interactPointX - fx;
-      const dy = entry.interactPointY - fy;
+      if (!entry.getFrontInteractRect) continue;
+      if (entry.frontFacing && entry.frontFacing !== this.facing) continue;
+      const frontRect = entry.getFrontInteractRect();
+      if (!frontRect || !Phaser.Geom.Rectangle.Overlaps(frontRect, feetRect)) continue;
+      const centerX = frontRect.x + frontRect.width * 0.5;
+      const centerY = frontRect.y + frontRect.height * 0.5;
+      const dx = centerX - feet.x;
+      const dy = centerY - feet.y;
       const distSq = dx * dx + dy * dy;
-      if (distSq <= MAX_DIST_SQ && distSq < bestDistSq) {
+      if (distSq < bestDistSq) {
         bestDistSq = distSq;
         bestCandidate = entry;
+      }
+    }
+
+    if (!bestCandidate) {
+      for (const entry of this.interactables) {
+        if (entry.getInteractRect) {
+          const rect = entry.getInteractRect();
+          if (rect && Phaser.Geom.Rectangle.Overlaps(rect, feetRect)) {
+            bestCandidate = entry;
+            bestDistSq = 0;
+          }
+          continue;
+        }
+        const vx = entry.interactPointX - feet.x;
+        const vy = entry.interactPointY - feet.y;
+        const dot = vx * faceX + vy * faceY;
+        if (dot < FRONT_TOL) continue;
+        const dx = entry.interactPointX - fx;
+        const dy = entry.interactPointY - fy;
+        const distSq = dx * dx + dy * dy;
+        if (distSq <= MAX_DIST_SQ && distSq < bestDistSq) {
+          bestDistSq = distSq;
+          bestCandidate = entry;
+        }
       }
     }
 
@@ -2150,17 +2322,43 @@ class RoomScene extends Phaser.Scene {
       this.dialogTween.stop();
       this.dialogTween = null;
     }
+    this.dialogVariant = "default";
+    if (this.isValidDisplayObject(this.dialogTitleText)) {
+      this.dialogTitleText.setVisible(false);
+      this.dialogTitleText.setText("");
+    }
+    this.applyDialogTextLayout();
     this.dialogContainer.setVisible(false);
     this.runHeld = false;
     this.aIsDown = false;
     this.dialogOpen = false;
   }
 
+  closeTvOverlayWithResumeDelay() {
+    if (!this.tvOverlay?.isOpen) return;
+    this.tvOverlay.close();
+    this.deferMusicResumeFrames = Math.max(this.deferMusicResumeFrames, 2);
+  }
+
   openDialog(candidate) {
     const text = typeof candidate === "string" ? candidate : candidate?.text;
     if (!text) return;
+    const isTrophyPurchaseDialog =
+      !!candidate && typeof candidate === "object" && candidate.variant === "trophy_purchase";
     this.dialogOpen = true;
     this.dialogTyping = true;
+    this.dialogVariant = isTrophyPurchaseDialog ? "trophy_purchase" : "default";
+    if (this.isValidDisplayObject(this.dialogTitleText)) {
+      if (isTrophyPurchaseDialog) {
+        const titleText = String(candidate?.title || "").trim();
+        this.dialogTitleText.setText(titleText);
+        this.dialogTitleText.setVisible(!!titleText);
+      } else {
+        this.dialogTitleText.setVisible(false);
+        this.dialogTitleText.setText("");
+      }
+    }
+    this.applyDialogTextLayout();
     this.fullDialogText = text;
     this.dialogWrappedText = this.getWrappedDialogText(text);
     this.typeIndex = 0;
@@ -2182,41 +2380,24 @@ class RoomScene extends Phaser.Scene {
     this.startTypewriter();
   }
 
-  handleA(timeNow) {
-    if (this.uiModalOpen) {
-      return;
-    }
-
-    if (this.tvOverlay?.isOpen) {
-      if (!this.tvOverlay.soundUnlocked) this.tvOverlay.enableSoundFromGesture();
-      else this.tvOverlay.close();
-      this.touch.interact = false;
-      return;
-    }
-
-    if (this.dialogOpen) {
-      if (this.dialogTyping) this.finishTyping();
-      else this.closeDialog();
-      return;
-    }
-
-    const candidate = this.updateInteractCandidate(timeNow);
-    if (!candidate) {
-      this.pendingInteractUntil = timeNow + 300;
-      return;
-    }
+  activateInteractCandidate(candidate) {
+    if (!candidate) return false;
 
     if (this.isTrophyRoom() && typeof candidate.id === "string" && candidate.id.startsWith("pillar_")) {
       const pillarIndex = candidate.meta?.pillarIndex ?? Number(candidate.id.split("_")[1] || -1);
       const purchase = this.trophyPillars?.[pillarIndex]?.purchase || null;
       if (!purchase) {
         this.openDialog("An empty pedestal...");
-        return;
+        return true;
       }
       const beatName = purchase.beatName || "UNKNOWN BEAT";
-      const buyerName = purchase.buyerName || this.localIdentity?.name || "UNKNOWN";
-      this.openDialog(`TROPHY\n${beatName}\nBY: ${buyerName}`);
-      return;
+      const buyerName = (purchase.buyerName || this.localIdentity?.name || "UNKNOWN").toUpperCase();
+      this.openDialog({
+        variant: "trophy_purchase",
+        title: buyerName,
+        text: beatName,
+      });
+      return true;
     }
 
     if (this.isMainRoom()) {
@@ -2228,26 +2409,61 @@ class RoomScene extends Phaser.Scene {
           this.arcadeOverlay.open();
           this.arcadeOverlay.layout(this.gameCam);
         }
-        return;
+        return true;
       }
 
       if (candidate.id === "pc" && this.shop) {
         this.shop.unlockAudioFromGesture();
         this.shop.open();
         this.shop.layout(this.gameCam);
-        return;
+        this.pendingInteractUntil = 0;
+        this.touch.interact = false;
+        this.aIsDown = false;
+        this.runHeld = false;
+        return true;
       }
 
       if (candidate.id === "tv" && this.tvOverlay) {
         const url = this.getNextTvUrl();
+        if (this.gameMusic) this.gameMusic.pauseForOverlay();
         this.tvOverlay.open(url);
         this.tvOverlay.layout(this.gameCam);
         this.tvOverlay.enableSoundFromGesture();
-        return;
+        this.pendingInteractUntil = 0;
+        this.touch.interact = false;
+        return true;
       }
     }
 
     this.openDialog(candidate);
+    return true;
+  }
+
+  handleA(timeNow) {
+    if (this.uiModalOpen) {
+      return;
+    }
+
+    if (this.tvOverlay?.isOpen) {
+      this.closeTvOverlayWithResumeDelay();
+      this.touch.interact = false;
+      return;
+    }
+
+    if (this.dialogOpen) {
+      if (this.dialogTyping) this.finishTyping();
+      else this.closeDialog();
+      return;
+    }
+
+    const candidate =
+      this.updateInteractCandidate(timeNow) ||
+      (this.lastCandidate && timeNow - this.lastCandidateTime <= 250 ? this.lastCandidate : null);
+    if (!candidate) {
+      this.pendingInteractUntil = timeNow + 300;
+      return;
+    }
+    this.activateInteractCandidate(candidate);
   }
 
   setFacing(direction) {
@@ -2340,6 +2556,16 @@ class RoomScene extends Phaser.Scene {
       this._warmupNeedsInputReset = false;
     }
 
+    const tvOpenNow = !!this.tvOverlay?.isOpen;
+    if (this._tvWasOpenLastFrame && !tvOpenNow) {
+      this.deferMusicResumeFrames = Math.max(this.deferMusicResumeFrames, 2);
+    }
+    this._tvWasOpenLastFrame = tvOpenNow;
+
+    if (this.deferMusicResumeFrames > 0) {
+      this.deferMusicResumeFrames -= 1;
+    }
+
     this.uiModalOpen = !!this.emailOverlay?.isOpen?.();
     if (!this.uiModalOpen && this.emailOverlayWasOpen) {
       this.emailOverlayWasOpen = false;
@@ -2384,7 +2610,6 @@ class RoomScene extends Phaser.Scene {
         (this.keyEsc && Phaser.Input.Keyboard.JustDown(this.keyEsc));
       const aDown = (this.keyA && this.keyA.isDown) || (this.keySpace && this.keySpace.isDown);
 
-      if (this.gameMusic) this.gameMusic.pauseForOverlay();
       this.arcadeOverlay.layout(this.gameCam);
       this.arcadeOverlay.tick(now, { up, down, left, right, aJust, aDown, bJust: backJust });
 
@@ -2409,12 +2634,11 @@ class RoomScene extends Phaser.Scene {
       this.tvOverlay.layout(this.gameCam);
 
       if (aJust) {
-        if (!this.tvOverlay.soundUnlocked) this.tvOverlay.enableSoundFromGesture();
-        else this.tvOverlay.close();
+        this.closeTvOverlayWithResumeDelay();
         this.touch.interact = false;
       }
 
-      if (backJust) this.tvOverlay.close();
+      if (backJust) this.closeTvOverlayWithResumeDelay();
 
       this.freezePlayer();
       return;
@@ -2473,7 +2697,7 @@ class RoomScene extends Phaser.Scene {
     this.shopOpenedAt = 0;
     this.emailPromptSnoozedThisSession = false;
 
-    if (this.gameMusic && !this.tvOverlay?.isOpen && !this.shop?.isOpen) {
+    if (this.gameMusic && !this.tvOverlay?.isOpen && !this.shop?.isOpen && this.deferMusicResumeFrames <= 0) {
       this.gameMusic.resumeAfterOverlay();
     }
 
@@ -2498,7 +2722,8 @@ class RoomScene extends Phaser.Scene {
 
     const effectiveCandidate = this.updateInteractCandidate(now);
     if (!this.dialogOpen && this.pendingInteractUntil > now && effectiveCandidate) {
-      this.openDialog(effectiveCandidate);
+      this.pendingInteractUntil = 0;
+      this.activateInteractCandidate(effectiveCandidate);
       this.freezePlayer();
       return;
     }

@@ -277,6 +277,10 @@ export default class PacMini {
     return this.walls[this.index(x, y)] === 1;
   }
 
+  isPath(x, y) {
+    return this.isInside(x, y) && this.walls[this.index(x, y)] === 0;
+  }
+
   clearMap() {
     this.walls.fill(0);
     this.dots.fill(0);
@@ -294,13 +298,12 @@ export default class PacMini {
 
         if (char === "#") {
           this.walls[idx] = 1;
+          this.dots[idx] = 0;
           continue;
         }
 
         this.walls[idx] = 0;
-        if (char === ".") {
-          this.dots[idx] = 1;
-        }
+        this.dots[idx] = char === "." ? 1 : 0;
 
         if (char === "P") this.pacStart = { x, y };
         if (char === "G") this.ghostStart = { x, y };
@@ -327,12 +330,14 @@ export default class PacMini {
     for (let y = 0; y < this.rows; y += 1) {
       for (let x = 0; x < this.cols; x += 1) {
         const idx = this.index(x, y);
+        if (this.walls[idx] === 1) this.dots[idx] = 0;
         const center = this.cellCenter(x, y);
         const dot = this.scene.add.rectangle(center.x, center.y, 2, 2, 0xf4f6ff, 1).setOrigin(0.5, 0.5);
-        dot.setVisible(this.dots[idx] === 1);
+        const hasDot = this.dots[idx] === 1;
+        dot.setVisible(hasDot);
         this.dotSprites[idx] = dot;
         this.root.add(dot);
-        if (this.dots[idx] === 1) this.dotsLeft += 1;
+        if (hasDot) this.dotsLeft += 1;
       }
     }
   }
@@ -453,11 +458,13 @@ export default class PacMini {
 
     this.currentTemplate = this.generatePlayableTemplate();
     this.buildMazeFromTemplate(this.currentTemplate);
+    this.drawWalls();
 
     this.dotsLeft = 0;
     for (let y = 0; y < this.rows; y += 1) {
       for (let x = 0; x < this.cols; x += 1) {
         const idx = this.index(x, y);
+        if (this.walls[idx] === 1) this.dots[idx] = 0;
         const visible = this.dots[idx] === 1;
         if (visible) this.dotsLeft += 1;
         const dot = this.dotSprites[idx];
@@ -510,7 +517,7 @@ export default class PacMini {
   canMove(fromX, fromY, dirX, dirY) {
     const nx = fromX + dirX;
     const ny = fromY + dirY;
-    return !this.isWall(nx, ny);
+    return this.isPath(nx, ny);
   }
 
   stepPac() {
@@ -533,25 +540,71 @@ export default class PacMini {
       { x: 0, y: 1 },
       { x: 0, y: -1 },
     ];
-
+    const reverse = { x: -enemy.dir.x, y: -enemy.dir.y };
     const valid = [];
     for (let i = 0; i < dirs.length; i += 1) {
       const dir = dirs[i];
       if (!this.canMove(enemy.x, enemy.y, dir.x, dir.y)) continue;
       valid.push(dir);
     }
-
     if (!valid.length) return;
 
-    let chosen = valid[Math.floor(Math.random() * valid.length)];
-    for (let i = 0; i < valid.length; i += 1) {
-      const dir = valid[i];
-      if (dir.x === enemy.dir.x && dir.y === enemy.dir.y) {
-        chosen = dir;
-        break;
+    let options = valid;
+    if (valid.length > 1) {
+      const noReverse = valid.filter((dir) => !(dir.x === reverse.x && dir.y === reverse.y));
+      if (noReverse.length) options = noReverse;
+    }
+
+    const straight = options.find((dir) => dir.x === enemy.dir.x && dir.y === enemy.dir.y) || null;
+    let pickPool = options;
+    let chosen = null;
+
+    // Keep momentum most of the time, but force turns often enough to break perimeter loops.
+    if (straight && options.length > 1) {
+      if (Math.random() < 0.68) {
+        chosen = straight;
+      } else {
+        const turns = options.filter((dir) => !(dir.x === straight.x && dir.y === straight.y));
+        if (turns.length) pickPool = turns;
       }
     }
 
+    if (!chosen) {
+      const centerX = (this.cols - 1) * 0.5;
+      const centerY = (this.rows - 1) * 0.5;
+      let total = 0;
+      const weighted = [];
+
+      for (let i = 0; i < pickPool.length; i += 1) {
+        const dir = pickPool[i];
+        const nx = enemy.x + dir.x;
+        const ny = enemy.y + dir.y;
+        const centerDist = Math.abs(nx - centerX) + Math.abs(ny - centerY);
+        const playerDist = Math.abs(nx - this.pac.x) + Math.abs(ny - this.pac.y);
+        const interiorBonus = nx > 1 && nx < this.cols - 2 && ny > 1 && ny < this.rows - 2 ? 0.25 : 0;
+        const weight =
+          1 +
+          (straight && dir.x === straight.x && dir.y === straight.y ? 0.2 : 0) +
+          (1 / (1 + centerDist)) * 0.9 +
+          (1 / (1 + playerDist)) * 1.1 +
+          interiorBonus;
+        total += weight;
+        weighted.push({ dir, upto: total });
+      }
+
+      if (total > 0) {
+        const roll = Math.random() * total;
+        chosen = weighted[weighted.length - 1].dir;
+        for (let i = 0; i < weighted.length; i += 1) {
+          if (roll <= weighted[i].upto) {
+            chosen = weighted[i].dir;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!chosen) chosen = pickPool[Math.floor(Math.random() * pickPool.length)];
     enemy.dir = { x: chosen.x, y: chosen.y };
     enemy.x += chosen.x;
     enemy.y += chosen.y;
